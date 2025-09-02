@@ -1,6 +1,6 @@
 use axum::{
     extract::{Path, Query, State},
-    routing::{get, post},
+    routing::{get, post, patch},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -49,6 +49,8 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/sites/:id/content", get(get_site_content))
         .route("/content", get(list_content))
         .route("/content/:id/process", post(process_content))
+        .route("/content/:id", patch(update_content))
+        .route("/content/:id/versions", get(get_content_versions))
 }
 
 async fn create_site(
@@ -136,18 +138,65 @@ async fn trigger_crawl(
     let text_hash = blake3::hash(content.as_bytes()).to_hex().to_string();
     let word_count = content.split_whitespace().count() as i32;
 
+    // Insert or update content
+    let existing = sqlx::query!(
+        "SELECT id FROM content WHERE site_id = $1",
+        site_id
+    )
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|_| crate::error::ApiError::Internal)?;
+
+    let final_content_id = if let Some(existing_row) = existing {
+        // Update existing
+        sqlx::query!(
+            r#"
+            UPDATE content 
+            SET text_content = $1, text_hash = $2, word_count = $3
+            WHERE id = $4
+            "#,
+            content,
+            text_hash,
+            word_count,
+            existing_row.id
+        )
+        .execute(&state.db)
+        .await
+        .map_err(|_| crate::error::ApiError::Internal)?;
+        
+        existing_row.id
+    } else {
+        // Create new
+        sqlx::query!(
+            r#"
+            INSERT INTO content (id, site_id, url, text_content, text_hash, word_count)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            "#,
+            content_id,
+            site_id,
+            site.url,
+            content,
+            text_hash,
+            word_count
+        )
+        .execute(&state.db)
+        .await
+        .map_err(|_| crate::error::ApiError::Internal)?;
+        
+        content_id
+    };
+
+    // Save version history
     sqlx::query!(
         r#"
-        INSERT INTO content (id, site_id, url, text_content, text_hash, word_count)
-        VALUES ($1, $2, $3, $4, $5, $6)
-        ON CONFLICT (text_hash) DO NOTHING
+        INSERT INTO content_versions (content_id, text_content, text_hash, word_count, version_type, created_by)
+        VALUES ($1, $2, $3, $4, 'crawl', $5)
         "#,
-        content_id,
-        site_id,
-        site.url,
+        final_content_id,
         content,
         text_hash,
-        word_count
+        word_count,
+        user.id
     )
     .execute(&state.db)
     .await
@@ -160,7 +209,7 @@ async fn trigger_crawl(
 
     Ok(Json(serde_json::json!({
         "status": "success",
-        "content_id": content_id,
+        "content_id": final_content_id,
         "word_count": word_count
     })))
 }
@@ -279,4 +328,84 @@ async fn process_content(
         "estimated_cost": cost,
         "word_count": content.word_count
     })))
+}
+
+async fn update_content(
+    State(state): State<Arc<AppState>>,
+    Path(content_id): Path<Uuid>,
+    user: DevUser,
+    Json(req): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>> {
+    let new_text = req["text_content"].as_str()
+        .ok_or(crate::error::ApiError::Internal)?;
+    
+    let word_count = new_text.split_whitespace().count() as i32;
+    let text_hash = blake3::hash(new_text.as_bytes()).to_hex().to_string();
+
+    // Save version before updating
+    sqlx::query!(
+        r#"
+        INSERT INTO content_versions (content_id, text_content, text_hash, word_count, version_type, created_by)
+        VALUES ($1, $2, $3, $4, 'edit', $5)
+        "#,
+        content_id,
+        new_text,
+        text_hash,
+        word_count,
+        user.id
+    )
+    .execute(&state.db)
+    .await
+    .map_err(|_| crate::error::ApiError::Internal)?;
+
+    // Update current content
+    sqlx::query!(
+        r#"
+        UPDATE content 
+        SET text_content = $1, text_hash = $2, word_count = $3
+        WHERE id = $4
+        "#,
+        new_text,
+        text_hash,
+        word_count,
+        content_id
+    )
+    .execute(&state.db)
+    .await
+    .map_err(|_| crate::error::ApiError::Internal)?;
+
+    Ok(Json(serde_json::json!({
+        "status": "success",
+        "word_count": word_count
+    })))
+}
+
+async fn get_content_versions(
+    State(state): State<Arc<AppState>>,
+    Path(content_id): Path<Uuid>,
+    _user: DevUser,
+) -> Result<Json<Vec<serde_json::Value>>> {
+    let versions = sqlx::query!(
+        r#"
+        SELECT id, version_type, word_count, created_at
+        FROM content_versions
+        WHERE content_id = $1
+        ORDER BY created_at DESC
+        "#,
+        content_id
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(|_| crate::error::ApiError::Internal)?;
+
+    Ok(Json(
+        versions.into_iter()
+            .map(|v| serde_json::json!({
+                "id": v.id,
+                "type": v.version_type,
+                "word_count": v.word_count,
+                "created_at": v.created_at
+            }))
+            .collect()
+    ))
 }
