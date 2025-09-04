@@ -30,6 +30,9 @@ pub enum ApiError {
     
     #[error("Internal error")]
     Internal,
+
+    #[error("Internal request")]
+    InvalidRequest,
 }
 
 impl IntoResponse for ApiError {
