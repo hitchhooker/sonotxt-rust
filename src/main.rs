@@ -1,55 +1,55 @@
-mod auth;
-mod config;
-mod error;
-mod routes;
-mod services;
-mod worker;
 use sonotxt::{build_app, AppState, Config};
-
-use axum::Router;
-use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
-
-pub struct AppState {
-    pub db: sqlx::PgPool,
-    pub config: config::Config,
-}
 
 #[tokio::main]
 async fn main() {
-    dotenvy::dotenv().ok();
-    env_logger::init();
-
-    let config = config::Config::from_env();
-    let db = PgPoolOptions::new()
+    let config = Config::from_env();
+    
+    tracing_subscriber::fmt()
+        .with_env_filter(&config.log_level)
+        .init();
+    
+    let redis_client = redis::Client::open(config.redis_url.as_str())
+        .expect("Redis connection failed");
+    
+    let redis = redis::aio::ConnectionManager::new(redis_client)
+        .await
+        .expect("Redis manager failed");
+    
+    let db = sqlx::postgres::PgPoolOptions::new()
         .max_connections(5)
         .connect(&config.database_url)
         .await
-        .expect("Failed to connect to database");
-
-    sqlx::migrate!("./migrations")
-        .run(&db)
-        .await
-        .expect("Failed to run migrations");
-
-    let state = Arc::new(AppState { db, config });
-
-    // Spawn worker task
-    let worker_state = state.clone();
-    tokio::spawn(async move {
-        crate::worker::run_worker(worker_state).await;
-    });
-
-    let app = Router::new()
-        .nest("/", routes::api::routes())
-        .with_state(state);
-
-    println!("Server starting on http://0.0.0.0:8080");
+        .expect("Database connection failed");
     
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:8080")
+    // Skip migrations - tables already exist
+    // sqlx::migrate!("./migrations")
+    //     .run(&db)
+    //     .await
+    //     .expect("Failed to run migrations");
+    
+    let http = reqwest::Client::builder()
+        .user_agent("SonoTxt/1.0")
+        .timeout(std::time::Duration::from_secs(config.request_timeout))
+        .build()
+        .expect("HTTP client failed");
+    
+    let state = Arc::new(AppState {
+        config: config.clone(),
+        redis,
+        http,
+        db,
+    });
+    
+    let app = build_app(state);
+    
+    let addr = format!("{}:{}", config.host, config.port);
+    let listener = tokio::net::TcpListener::bind(&addr)
         .await
-        .expect("Failed to bind");
-
+        .expect("Bind failed");
+    
+    tracing::info!("Server running on {}", addr);
+    
     axum::serve(listener, app)
         .await
         .expect("Server failed");

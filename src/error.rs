@@ -31,7 +31,7 @@ pub enum ApiError {
     #[error("Internal error")]
     Internal,
 
-    #[error("Internal request")]
+    #[error("Invalid request")]
     InvalidRequest,
 }
 
@@ -45,10 +45,17 @@ impl IntoResponse for ApiError {
             ApiError::ProcessingFailed => (StatusCode::UNPROCESSABLE_ENTITY, self.to_string()),
             ApiError::NotFound => (StatusCode::NOT_FOUND, self.to_string()),
             ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, self.to_string()),
+            ApiError::InvalidRequest => (StatusCode::BAD_REQUEST, self.to_string()),
             ApiError::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string()),
         };
         
         (status, Json(json!({ "error": message }))).into_response()
+    }
+}
+
+impl From<sqlx::Error> for ApiError {
+    fn from(_: sqlx::Error) -> Self {
+        ApiError::Internal
     }
 }
 

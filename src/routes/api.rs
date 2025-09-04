@@ -3,14 +3,14 @@ use axum::{
    routing::{get, post},
    Json, Router,
 };
-use blake3::Hasher;
 use std::{collections::HashMap, sync::Arc};
+use uuid::Uuid;
 
-use crate::{
+use crate::{error::Result,
    extractors::AuthenticatedUser,
    models::{JobStatus, ProcessRequest, ProcessResponse},
    services::content::extract_content,
-   AppState, Result,
+   AppState,
 };
 
 pub fn routes() -> Router<Arc<AppState>> {
@@ -31,26 +31,22 @@ async fn process(
        return Err(crate::error::ApiError::InsufficientBalance);
    }
 
-   let mut hasher = Hasher::new();
-   hasher.update(content.as_bytes());
-   hasher.update(req.url.as_bytes());
-   let job_id = hasher.finalize().to_hex()[..16].to_string();
-
-   // Queue job to Redis
-   let job_data = serde_json::json!({
-       "id": job_id,
-       "content": content,
-       "api_key": api_key.key,
-       "cost": estimated_cost,
-   });
-
-   let mut redis = state.redis.clone();
-   redis::cmd("LPUSH")
-       .arg("tts_queue")
-       .arg(job_data.to_string())
-       .query_async::<_, ()>(&mut redis)
-       .await
-       .map_err(|_| crate::error::ApiError::Internal)?;
+   let job_id = Uuid::new_v4().to_string();
+   
+   sqlx::query!(
+       "INSERT INTO jobs (id, api_key, text_content, status) VALUES ($1, $2, $3, 'queued')",
+       job_id,
+       api_key.key,
+       content.as_str()
+   )
+   .execute(&state.db)
+   .await?;
+   
+   // Insert directly into jobs table
+   sqlx::query!(
+   )
+   .execute(&state.db)
+   .await?;
 
    Ok(Json(ProcessResponse {
        job_id,
@@ -67,21 +63,22 @@ async fn status(
        .get("job_id")
        .ok_or(crate::error::ApiError::NotFound)?;
 
-   let mut redis = state.redis.clone();
-   let status_key = format!("job:{}", job_id);
+   let job = sqlx::query!(
+       "SELECT status FROM jobs WHERE id = $1",
+       job_id
+   )
+   .fetch_optional(&state.db)
+   .await?;
    
-   let status: Option<String> = redis::cmd("GET")
-       .arg(&status_key)
-       .query_async(&mut redis)
-       .await
-       .map_err(|_| crate::error::ApiError::Internal)?;
-
-   match status {
-       Some(s) => {
-           let status: JobStatus = serde_json::from_str(&s)
-               .map_err(|_| crate::error::ApiError::Internal)?;
-           Ok(Json(status))
-       }
+   match job {
+       Some(j) => match j.status.as_deref() {
+           Some("completed") => Ok(Json(JobStatus::Complete { 
+               url: format!("https://storage.sonotxt.com/audio/{}.mp3", job_id),
+               duration_seconds: 0.0 
+           })),
+           Some("failed") => Ok(Json(JobStatus::Failed { reason: "Processing failed".into() })),
+           _ => Ok(Json(JobStatus::Queued)),
+       },
        None => Ok(Json(JobStatus::Queued))
    }
 }

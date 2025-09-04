@@ -71,7 +71,7 @@ async fn create_site(
         req.auto_crawl,
         req.crawl_frequency_hours.unwrap_or(24)
     )
-    .fetch_one(&state.db)
+    .fetch_optional(&state.db)
     .await
     .map_err(|_| crate::error::ApiError::Internal)?;
 
@@ -129,9 +129,10 @@ async fn trigger_crawl(
         site_id,
         user.id
     )
-    .fetch_one(&state.db)
+    .fetch_optional(&state.db)
+    .ok_or(crate::error::ApiError::NotFound)?;
     .await
-    .map_err(|_| crate::error::ApiError::NotFound)?;
+    .map_err(|e| { eprintln!("Query error: {:?}", e); crate::error::ApiError::NotFound })?;
 
     let content = crawl_site(&site.url, site.selector.as_deref()).await?;
     
@@ -230,9 +231,9 @@ async fn get_site_content(
         "#,
         site_id
     )
-    .fetch_one(&state.db)
+    .fetch_optional(&state.db)
     .await
-    .map_err(|_| crate::error::ApiError::NotFound)?;
+    .map_err(|e| { eprintln!("Query error: {:?}", e); crate::error::ApiError::NotFound })?;
     
     Ok(Json(Content {
         id: row.id,
@@ -317,9 +318,9 @@ async fn process_content(
         "#,
         content_id
     )
-    .fetch_one(&state.db)
+    .fetch_optional(&state.db)
     .await
-    .map_err(|_| crate::error::ApiError::NotFound)?;
+    .map_err(|e| { eprintln!("Query error: {:?}", e); crate::error::ApiError::NotFound })?;
 
     let job_id = blake3::hash(content.text_content.as_bytes()).to_hex()[..16].to_string();
     let cost = (content.text_content.len() as f64) * state.config.cost_per_char;
@@ -421,9 +422,9 @@ async fn submit_tts_job(
         "SELECT word_count FROM content WHERE id = $1",
         content_id  
     )
-    .fetch_one(&state.db)
+    .fetch_optional(&state.db)
     .await
-    .map_err(|_| crate::error::ApiError::NotFound)?;
+    .map_err(|e| { eprintln!("Query error: {:?}", e); crate::error::ApiError::NotFound })?;
     
     // Create job
     let job_id = Uuid::new_v4().to_string();

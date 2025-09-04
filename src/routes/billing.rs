@@ -7,10 +7,10 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use crate::{
+use crate::{error::Result,
     auth::dev::DevUser,
     services::billing,
-    AppState, Result,
+    AppState,
 };
 
 #[derive(Deserialize)]
@@ -51,10 +51,10 @@ async fn get_status(
     
     let status = match account {
         Some(acc) => AccountStatus {
-            balance: acc.balance,
+            balance: acc.balance.unwrap_or(0.0),
             subscription_type: acc.subscription_type,
             subscription_expires: acc.subscription_expires,
-            watermark_free: acc.watermark_free,
+            watermark_free: acc.watermark_free.unwrap_or(false),
         },
         None => {
             // Create account with free credits

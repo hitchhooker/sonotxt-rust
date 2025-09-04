@@ -10,7 +10,7 @@ use axum_extra::{
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::{models::ApiKey, AppState, Result};
+use crate::{error::Result, models::ApiKey, AppState};
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new().route("/admin/apikey", post(create_api_key))
