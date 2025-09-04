@@ -33,6 +33,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .merge(routes::api::routes())
         .merge(routes::admin::routes())
         .merge(routes::sites::routes())
+        .merge(routes::billing::routes())
         .layer(CorsLayer::very_permissive())
         .layer(RequestBodyLimitLayer::new(1024 * 1024))
         .layer(TimeoutLayer::new(std::time::Duration::from_secs(
