@@ -1,9 +1,7 @@
-use crate::{error::Result, AppState};
+use crate::error::Result;
 use scraper::{Html, Selector};
-use std::sync::Arc;
 
 pub async fn crawl_site(
-    state: &Arc<AppState>,
     url: &str,
     selector: Option<&str>,
 ) -> Result<String> {

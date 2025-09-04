@@ -51,6 +51,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/content/:id/process", post(process_content))
         .route("/content/:id", patch(update_content))
         .route("/content/:id/versions", get(get_content_versions))
+        .route("/content/:id/tts", post(submit_tts_job))
 }
 
 async fn create_site(
@@ -132,7 +133,7 @@ async fn trigger_crawl(
     .await
     .map_err(|_| crate::error::ApiError::NotFound)?;
 
-    let content = crawl_site(&state, &site.url, site.selector.as_deref()).await?;
+    let content = crawl_site(&site.url, site.selector.as_deref()).await?;
     
     let content_id = Uuid::new_v4();
     let text_hash = blake3::hash(content.as_bytes()).to_hex().to_string();
@@ -408,4 +409,40 @@ async fn get_content_versions(
             }))
             .collect()
     ))
+}
+
+async fn submit_tts_job(
+    State(state): State<Arc<AppState>>,
+    Path(content_id): Path<Uuid>,
+    _user: DevUser,
+) -> Result<Json<serde_json::Value>> {
+    // Check content exists
+    let content = sqlx::query!(
+        "SELECT word_count FROM content WHERE id = $1",
+        content_id  
+    )
+    .fetch_one(&state.db)
+    .await
+    .map_err(|_| crate::error::ApiError::NotFound)?;
+    
+    // Create job
+    let job_id = Uuid::new_v4().to_string();
+    
+    sqlx::query!(
+        r#"
+        INSERT INTO jobs (id, content_id, api_key)
+        VALUES ($1, $2, 'dev-token-123')
+        "#,
+        job_id,
+        content_id
+    )
+    .execute(&state.db)
+    .await
+    .map_err(|_| crate::error::ApiError::Internal)?;
+    
+    Ok(Json(serde_json::json!({
+        "job_id": job_id,
+        "status": "queued",
+        "word_count": content.word_count
+    })))
 }

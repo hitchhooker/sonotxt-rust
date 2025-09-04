@@ -33,6 +33,22 @@ pub struct Config {
 
     #[arg(long, env = "DATABASE_URL", default_value = "postgres://localhost/sonotxt")]
     pub database_url: String,
+
+    #[arg(long, env = "FREE_MINUTES_DAILY", default_value = "3")]
+    pub free_minutes_daily: i32,
+    
+    #[arg(long, env = "WATERMARK_TEXT", default_value = "Voiced by sonotxt.com")]
+    pub watermark_text: String,
+    
+    #[arg(long, env = "COST_PER_MINUTE", default_value = "0.004")]
+    pub cost_per_minute: f64, // actual GPU cost
+    
+    #[arg(long, env = "MODEL_1_5B_MULTIPLIER", default_value = "1.0")]
+    pub model_1_5b_multiplier: f64,
+    
+    #[arg(long, env = "MODEL_7B_MULTIPLIER", default_value = "2.0")]
+    pub model_7b_multiplier: f64,
+
 }
 
 impl Config {
