@@ -31,6 +31,12 @@ pub enum ApiError {
     #[error("Unauthorized")]
     Unauthorized,
 
+    #[error("Invalid credentials")]
+    InvalidCredentials,
+
+    #[error("Rate limited - please try again later")]
+    RateLimited,
+
     #[error("Internal error")]
     InternalError,
 
@@ -63,6 +69,8 @@ impl IntoResponse for ApiError {
             ApiError::ProcessingFailed => (StatusCode::UNPROCESSABLE_ENTITY, json!({ "error": self.to_string() })),
             ApiError::NotFound => (StatusCode::NOT_FOUND, json!({ "error": self.to_string() })),
             ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, json!({ "error": self.to_string() })),
+            ApiError::InvalidCredentials => (StatusCode::UNAUTHORIZED, json!({ "error": self.to_string() })),
+            ApiError::RateLimited => (StatusCode::TOO_MANY_REQUESTS, json!({ "error": self.to_string() })),
             ApiError::InternalError => (StatusCode::INTERNAL_SERVER_ERROR, json!({ "error": self.to_string() })),
             ApiError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, json!({ "error": self.to_string() })),
             ApiError::InvalidRequestError => (StatusCode::BAD_REQUEST, json!({ "error": self.to_string() })),

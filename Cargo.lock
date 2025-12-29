@@ -12318,6 +12318,7 @@ dependencies = [
 name = "sonotxt"
 version = "0.1.0"
 dependencies = [
+ "argon2",
  "aws-config",
  "aws-credential-types",
  "aws-sdk-s3",
@@ -12328,6 +12329,8 @@ dependencies = [
  "chrono",
  "clap",
  "dotenvy",
+ "ed25519-dalek",
+ "getrandom 0.2.16",
  "headers",
  "hex",
  "hmac 0.12.1",

@@ -4,3 +4,4 @@ pub mod auth;
 pub mod billing;
 pub mod payments;
 pub mod sites;
+pub mod user_auth;

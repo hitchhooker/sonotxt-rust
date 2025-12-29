@@ -37,6 +37,11 @@ hex = "0.4"
 hmac = "0.12"
 sha2 = "0.10"
 
+# user auth with passphrase-derived keys
+ed25519-dalek = "2"
+argon2 = "0.5"
+getrandom = "0.2"
+
 # hardware-secured payment processor
 hwpay = { path = "../../hwpay", features = ["penumbra"] }
 secrecy = "0.10"
