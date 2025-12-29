@@ -16,11 +16,10 @@ use crate::{
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
-        // key-based auth
-        .route("/check-identifier", post(check_identifier))
-        .route("/register/key", post(register_with_key))
-        .route("/login/key/start", post(start_key_login))
-        .route("/login/key/complete", post(complete_key_login))
+        // nickname + pin auth
+        .route("/check-nickname", post(check_nickname))
+        .route("/register", post(register))
+        .route("/login", post(login))
         // magic link auth
         .route("/magic-link/request", post(request_magic_link))
         .route("/magic-link/verify", post(verify_magic_link))
@@ -30,77 +29,71 @@ pub fn routes() -> Router<Arc<AppState>> {
 }
 
 // ============================================================================
-// Key-based auth endpoints
+// Nickname + Pin auth endpoints
 // ============================================================================
 
 #[derive(Debug, Deserialize)]
-pub struct CheckIdentifierRequest {
-    identifier: String,
+pub struct CheckNicknameRequest {
+    nickname: String,
 }
 
 #[derive(Debug, Serialize)]
-pub struct CheckIdentifierResponse {
+pub struct CheckNicknameResponse {
     available: bool,
-    public_key: String,
 }
 
-/// Check if an identifier is available and preview the derived public key
-pub async fn check_identifier(
+/// Check if a nickname is available
+pub async fn check_nickname(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<CheckIdentifierRequest>,
-) -> Result<Json<CheckIdentifierResponse>> {
-    if req.identifier.len() < 8 {
-        return Err(crate::error::ApiError::InvalidRequestError);
+    Json(req): Json<CheckNicknameRequest>,
+) -> Result<Json<CheckNicknameResponse>> {
+    if let Err(e) = user_auth::validate_nickname(&req.nickname) {
+        return Err(crate::error::ApiError::InvalidRequest(e.to_string()));
     }
 
-    let available = user_auth::is_identifier_available(&state.db, &req.identifier).await?;
-    let public_key = user_auth::identifier_to_pubkey(&req.identifier);
+    let available = user_auth::is_nickname_available(&state.db, &req.nickname).await?;
 
-    Ok(Json(CheckIdentifierResponse {
-        available,
-        public_key,
-    }))
+    Ok(Json(CheckNicknameResponse { available }))
 }
 
 #[derive(Debug, Deserialize)]
-pub struct RegisterKeyRequest {
-    identifier: String,
+pub struct RegisterRequest {
+    nickname: String,
+    pin: String,
 }
 
 #[derive(Debug, Serialize)]
 pub struct AuthResponse {
     user_id: String,
-    public_key: Option<String>,
+    nickname: Option<String>,
     email: Option<String>,
     balance: f64,
     token: String,
 }
 
-/// Register with passphrase-derived key
-pub async fn register_with_key(
+/// Register with nickname + pin
+pub async fn register(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<RegisterKeyRequest>,
+    Json(req): Json<RegisterRequest>,
 ) -> Result<Json<AuthResponse>> {
-    if req.identifier.len() < 8 {
-        return Err(crate::error::ApiError::InvalidRequestError);
-    }
-
     // register user
-    let user = user_auth::register_with_key(&state.db, &req.identifier).await?;
+    let user = user_auth::register_with_pin(&state.db, &req.nickname, &req.pin).await?;
 
-    // auto-login: create challenge and sign it
-    let challenge = user_auth::start_key_login(&state.db, &req.identifier).await?;
-    let signature = user_auth::sign_challenge(&req.identifier, &challenge);
-    let (user, token) = user_auth::complete_key_login(
+    // auto-login: get challenge and sign it client-side would be better,
+    // but for simplicity we do it server-side here
+    let challenge = user_auth::start_pin_login(&state.db, &req.nickname, &req.pin).await?;
+    let signature = user_auth::sign_challenge(&req.nickname, &req.pin, &challenge);
+    let (user, token) = user_auth::complete_pin_login(
         &state.db,
-        &req.identifier,
+        &req.nickname,
+        &req.pin,
         &challenge,
         &signature,
     ).await?;
 
     Ok(Json(AuthResponse {
         user_id: user.id.to_string(),
-        public_key: user.public_key,
+        nickname: Some(req.nickname),
         email: user.email,
         balance: user.balance,
         token,
@@ -108,46 +101,34 @@ pub async fn register_with_key(
 }
 
 #[derive(Debug, Deserialize)]
-pub struct StartKeyLoginRequest {
-    identifier: String,
+pub struct LoginRequest {
+    nickname: String,
+    pin: String,
 }
 
-#[derive(Debug, Serialize)]
-pub struct ChallengeResponse {
-    challenge: String,
-}
-
-/// Start key-based login - get a challenge to sign
-pub async fn start_key_login(
+/// Login with nickname + pin
+pub async fn login(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<StartKeyLoginRequest>,
-) -> Result<Json<ChallengeResponse>> {
-    let challenge = user_auth::start_key_login(&state.db, &req.identifier).await?;
-    Ok(Json(ChallengeResponse { challenge }))
-}
-
-#[derive(Debug, Deserialize)]
-pub struct CompleteKeyLoginRequest {
-    identifier: String,
-    challenge: String,
-    signature: String,
-}
-
-/// Complete key-based login with signed challenge
-pub async fn complete_key_login(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<CompleteKeyLoginRequest>,
+    Json(req): Json<LoginRequest>,
 ) -> Result<Json<AuthResponse>> {
-    let (user, token) = user_auth::complete_key_login(
+    // get challenge
+    let challenge = user_auth::start_pin_login(&state.db, &req.nickname, &req.pin).await?;
+
+    // sign it (in real client-side flow, client would sign)
+    let signature = user_auth::sign_challenge(&req.nickname, &req.pin, &challenge);
+
+    // complete login
+    let (user, token) = user_auth::complete_pin_login(
         &state.db,
-        &req.identifier,
-        &req.challenge,
-        &req.signature,
+        &req.nickname,
+        &req.pin,
+        &challenge,
+        &signature,
     ).await?;
 
     Ok(Json(AuthResponse {
         user_id: user.id.to_string(),
-        public_key: user.public_key,
+        nickname: Some(req.nickname),
         email: user.email,
         balance: user.balance,
         token,
@@ -175,7 +156,7 @@ pub async fn request_magic_link(
 ) -> Result<Json<MessageResponse>> {
     let token = magic_link::request_magic_link(&state.db, &req.email).await?;
 
-    // send email (TODO: configure base URL from env)
+    // send email
     let base_url = std::env::var("APP_URL").unwrap_or_else(|_| "https://app.sonotxt.com".into());
     magic_link::send_magic_link_email(&req.email, &token, &base_url).await?;
 
@@ -198,7 +179,7 @@ pub async fn verify_magic_link(
 
     Ok(Json(AuthResponse {
         user_id: user.id.to_string(),
-        public_key: user.public_key,
+        nickname: None,
         email: user.email,
         balance: user.balance,
         token,
@@ -217,7 +198,6 @@ pub struct SessionRequest {
 #[derive(Debug, Serialize)]
 pub struct UserResponse {
     user_id: String,
-    public_key: Option<String>,
     email: Option<String>,
     balance: f64,
 }
@@ -231,7 +211,6 @@ pub async fn get_session(
 
     Ok(Json(UserResponse {
         user_id: user.id.to_string(),
-        public_key: user.public_key,
         email: user.email,
         balance: user.balance,
     }))
