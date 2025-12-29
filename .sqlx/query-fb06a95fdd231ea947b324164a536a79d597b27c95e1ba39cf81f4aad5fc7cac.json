@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT text_content, word_count\n        FROM content\n        WHERE id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "text_content",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "word_count",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "fb06a95fdd231ea947b324164a536a79d597b27c95e1ba39cf81f4aad5fc7cac"
+}

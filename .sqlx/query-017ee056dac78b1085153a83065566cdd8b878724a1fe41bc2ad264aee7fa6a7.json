@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT status, audio_url, duration_seconds, error_message FROM jobs WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "audio_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "duration_seconds",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 3,
+        "name": "error_message",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "017ee056dac78b1085153a83065566cdd8b878724a1fe41bc2ad264aee7fa6a7"
+}

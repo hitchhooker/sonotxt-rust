@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT balance, subscription_type, subscription_expires, watermark_free\n        FROM account_credits\n        WHERE account_id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "balance",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 1,
+        "name": "subscription_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "subscription_expires",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 3,
+        "name": "watermark_free",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "ee578001ab525d34beddd600d4d65050fffb5038150af567dce95195d71b7225"
+}

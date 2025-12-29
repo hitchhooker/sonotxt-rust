@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE free_tier_usage SET chars_used = chars_used + $1 WHERE ip_hash = $2",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ebafdff8ee20b1cfb6a3aec5873a0b5919730a9b2d1ae789e00eef4a0ab5f99a"
+}

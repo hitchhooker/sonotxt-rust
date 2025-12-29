@@ -8,7 +8,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::{
-    auth::dev::DevUser,
+    auth::AuthenticatedUser,
     error::Result,
     services::crawler::crawl_site,
     AppState,
@@ -56,7 +56,7 @@ pub fn routes() -> Router<Arc<AppState>> {
 
 async fn create_site(
     State(state): State<Arc<AppState>>,
-    user: DevUser,
+    user: AuthenticatedUser,
     Json(req): Json<CreateSiteRequest>,
 ) -> Result<Json<Site>> {
     let row = sqlx::query!(
@@ -65,28 +65,28 @@ async fn create_site(
         VALUES ($1, $2, $3, $4, $5)
         RETURNING id, url, selector, auto_crawl, last_crawled_at
         "#,
-        user.id,
+        user.account_id,
         req.url,
         req.selector,
         req.auto_crawl,
         req.crawl_frequency_hours.unwrap_or(24)
     )
-    .fetch_optional(&state.db)
+    .fetch_one(&state.db)
     .await
-    .map_err(|_| crate::error::ApiError::Internal)?;
+    .map_err(|_| crate::error::ApiError::InternalError)?;
 
     Ok(Json(Site {
         id: row.id,
         url: row.url,
         selector: row.selector,
-        auto_crawl: row.auto_crawl.unwrap_or(false),
+        auto_crawl: row.auto_crawl,
         last_crawled_at: row.last_crawled_at,
     }))
 }
 
 async fn list_sites(
     State(state): State<Arc<AppState>>,
-    user: DevUser,
+    user: AuthenticatedUser,
 ) -> Result<Json<Vec<Site>>> {
     let rows = sqlx::query!(
         r#"
@@ -95,11 +95,11 @@ async fn list_sites(
         WHERE account_id = $1
         ORDER BY created_at DESC
         "#,
-        user.id
+        user.account_id
     )
     .fetch_all(&state.db)
     .await
-    .map_err(|_| crate::error::ApiError::Internal)?;
+    .map_err(|_| crate::error::ApiError::InternalError)?;
 
     let sites = rows
         .into_iter()
@@ -107,7 +107,7 @@ async fn list_sites(
             id: row.id,
             url: row.url,
             selector: row.selector,
-            auto_crawl: row.auto_crawl.unwrap_or(false),
+            auto_crawl: row.auto_crawl,
             last_crawled_at: row.last_crawled_at,
         })
         .collect();
@@ -118,7 +118,7 @@ async fn list_sites(
 async fn trigger_crawl(
     State(state): State<Arc<AppState>>,
     Path(site_id): Path<Uuid>,
-    user: DevUser,
+    user: AuthenticatedUser,
 ) -> Result<Json<serde_json::Value>> {
     let site = sqlx::query!(
         r#"
@@ -127,12 +127,12 @@ async fn trigger_crawl(
         WHERE id = $1 AND account_id = $2
         "#,
         site_id,
-        user.id
+        user.account_id
     )
     .fetch_optional(&state.db)
-    .ok_or(crate::error::ApiError::NotFound)?;
     .await
-    .map_err(|e| { eprintln!("Query error: {:?}", e); crate::error::ApiError::NotFound })?;
+    .map_err(|_| crate::error::ApiError::InternalError)?
+    .ok_or(crate::error::ApiError::NotFound)?;
 
     let content = crawl_site(&site.url, site.selector.as_deref()).await?;
     
@@ -147,7 +147,7 @@ async fn trigger_crawl(
     )
     .fetch_optional(&state.db)
     .await
-    .map_err(|_| crate::error::ApiError::Internal)?;
+    .map_err(|_| crate::error::ApiError::InternalError)?;
 
     let final_content_id = if let Some(existing_row) = existing {
         // Update existing
@@ -164,7 +164,7 @@ async fn trigger_crawl(
         )
         .execute(&state.db)
         .await
-        .map_err(|_| crate::error::ApiError::Internal)?;
+        .map_err(|_| crate::error::ApiError::InternalError)?;
         
         existing_row.id
     } else {
@@ -183,7 +183,7 @@ async fn trigger_crawl(
         )
         .execute(&state.db)
         .await
-        .map_err(|_| crate::error::ApiError::Internal)?;
+        .map_err(|_| crate::error::ApiError::InternalError)?;
         
         content_id
     };
@@ -198,16 +198,16 @@ async fn trigger_crawl(
         content,
         text_hash,
         word_count,
-        user.id
+        user.account_id
     )
     .execute(&state.db)
     .await
-    .map_err(|_| crate::error::ApiError::Internal)?;
+    .map_err(|_| crate::error::ApiError::InternalError)?;
 
     sqlx::query!("UPDATE sites SET last_crawled_at = NOW() WHERE id = $1", site_id)
         .execute(&state.db)
         .await
-        .map_err(|_| crate::error::ApiError::Internal)?;
+        .map_err(|_| crate::error::ApiError::InternalError)?;
 
     Ok(Json(serde_json::json!({
         "status": "success",
@@ -219,7 +219,7 @@ async fn trigger_crawl(
 async fn get_site_content(
     State(state): State<Arc<AppState>>,
     Path(site_id): Path<Uuid>,
-    _user: DevUser,
+    _user: AuthenticatedUser,
 ) -> Result<Json<Content>> {
     let row = sqlx::query!(
         r#"
@@ -233,8 +233,9 @@ async fn get_site_content(
     )
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| { eprintln!("Query error: {:?}", e); crate::error::ApiError::NotFound })?;
-    
+    .map_err(|_| crate::error::ApiError::InternalError)?
+    .ok_or(crate::error::ApiError::NotFound)?;
+
     Ok(Json(Content {
         id: row.id,
         site_id: row.site_id.unwrap_or(site_id),
@@ -249,10 +250,10 @@ async fn get_site_content(
 async fn list_content(
     State(state): State<Arc<AppState>>,
     Query(params): Query<std::collections::HashMap<String, String>>,
-    user: DevUser,
+    user: AuthenticatedUser,
 ) -> Result<Json<Vec<serde_json::Value>>> {
     let content = if let Some(site_id) = params.get("site_id") {
-        let site_uuid = Uuid::parse_str(site_id).map_err(|_| crate::error::ApiError::Internal)?;
+        let site_uuid = Uuid::parse_str(site_id).map_err(|_| crate::error::ApiError::InternalError)?;
         
         let rows = sqlx::query!(
             r#"
@@ -262,12 +263,12 @@ async fn list_content(
             WHERE s.account_id = $1 AND c.site_id = $2
             ORDER BY c.created_at DESC
             "#,
-            user.id,
+            user.account_id,
             site_uuid
         )
         .fetch_all(&state.db)
         .await
-        .map_err(|_| crate::error::ApiError::Internal)?;
+        .map_err(|_| crate::error::ApiError::InternalError)?;
         
         rows.into_iter()
             .map(|c| serde_json::json!({
@@ -286,11 +287,11 @@ async fn list_content(
             WHERE s.account_id = $1
             ORDER BY c.created_at DESC
             "#,
-            user.id
+            user.account_id
         )
         .fetch_all(&state.db)
         .await
-        .map_err(|_| crate::error::ApiError::Internal)?;
+        .map_err(|_| crate::error::ApiError::InternalError)?;
         
         rows.into_iter()
             .map(|c| serde_json::json!({
@@ -308,7 +309,7 @@ async fn list_content(
 async fn process_content(
     State(state): State<Arc<AppState>>,
     Path(content_id): Path<Uuid>,
-    _user: DevUser,
+    _user: AuthenticatedUser,
 ) -> Result<Json<serde_json::Value>> {
     let content = sqlx::query!(
         r#"
@@ -320,7 +321,8 @@ async fn process_content(
     )
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| { eprintln!("Query error: {:?}", e); crate::error::ApiError::NotFound })?;
+    .map_err(|_| crate::error::ApiError::InternalError)?
+    .ok_or(crate::error::ApiError::NotFound)?;
 
     let job_id = blake3::hash(content.text_content.as_bytes()).to_hex()[..16].to_string();
     let cost = (content.text_content.len() as f64) * state.config.cost_per_char;
@@ -335,11 +337,11 @@ async fn process_content(
 async fn update_content(
     State(state): State<Arc<AppState>>,
     Path(content_id): Path<Uuid>,
-    user: DevUser,
+    user: AuthenticatedUser,
     Json(req): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>> {
     let new_text = req["text_content"].as_str()
-        .ok_or(crate::error::ApiError::Internal)?;
+        .ok_or(crate::error::ApiError::InternalError)?;
     
     let word_count = new_text.split_whitespace().count() as i32;
     let text_hash = blake3::hash(new_text.as_bytes()).to_hex().to_string();
@@ -354,11 +356,11 @@ async fn update_content(
         new_text,
         text_hash,
         word_count,
-        user.id
+        user.account_id
     )
     .execute(&state.db)
     .await
-    .map_err(|_| crate::error::ApiError::Internal)?;
+    .map_err(|_| crate::error::ApiError::InternalError)?;
 
     // Update current content
     sqlx::query!(
@@ -374,7 +376,7 @@ async fn update_content(
     )
     .execute(&state.db)
     .await
-    .map_err(|_| crate::error::ApiError::Internal)?;
+    .map_err(|_| crate::error::ApiError::InternalError)?;
 
     Ok(Json(serde_json::json!({
         "status": "success",
@@ -385,7 +387,7 @@ async fn update_content(
 async fn get_content_versions(
     State(state): State<Arc<AppState>>,
     Path(content_id): Path<Uuid>,
-    _user: DevUser,
+    _user: AuthenticatedUser,
 ) -> Result<Json<Vec<serde_json::Value>>> {
     let versions = sqlx::query!(
         r#"
@@ -398,7 +400,7 @@ async fn get_content_versions(
     )
     .fetch_all(&state.db)
     .await
-    .map_err(|_| crate::error::ApiError::Internal)?;
+    .map_err(|_| crate::error::ApiError::InternalError)?;
 
     Ok(Json(
         versions.into_iter()
@@ -415,7 +417,7 @@ async fn get_content_versions(
 async fn submit_tts_job(
     State(state): State<Arc<AppState>>,
     Path(content_id): Path<Uuid>,
-    _user: DevUser,
+    user: AuthenticatedUser,
 ) -> Result<Json<serde_json::Value>> {
     // Check content exists
     let content = sqlx::query!(
@@ -424,22 +426,24 @@ async fn submit_tts_job(
     )
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| { eprintln!("Query error: {:?}", e); crate::error::ApiError::NotFound })?;
-    
+    .map_err(|_| crate::error::ApiError::InternalError)?
+    .ok_or(crate::error::ApiError::NotFound)?;
+
     // Create job
     let job_id = Uuid::new_v4().to_string();
     
     sqlx::query!(
         r#"
         INSERT INTO jobs (id, content_id, api_key)
-        VALUES ($1, $2, 'dev-token-123')
+        VALUES ($1, $2, $3)
         "#,
         job_id,
-        content_id
+        content_id,
+        user.api_key
     )
     .execute(&state.db)
     .await
-    .map_err(|_| crate::error::ApiError::Internal)?;
+    .map_err(|_| crate::error::ApiError::InternalError)?;
     
     Ok(Json(serde_json::json!({
         "job_id": job_id,

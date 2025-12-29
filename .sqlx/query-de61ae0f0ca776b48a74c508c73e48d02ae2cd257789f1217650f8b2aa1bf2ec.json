@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO content_versions (content_id, text_content, text_hash, word_count, version_type, created_by)\n        VALUES ($1, $2, $3, $4, 'crawl', $5)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Int4",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "de61ae0f0ca776b48a74c508c73e48d02ae2cd257789f1217650f8b2aa1bf2ec"
+}

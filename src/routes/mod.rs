@@ -1,4 +1,6 @@
 pub mod admin;
 pub mod api;
-pub mod sites;
+pub mod auth;
 pub mod billing;
+pub mod payments;
+pub mod sites;

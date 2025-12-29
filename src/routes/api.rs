@@ -1,84 +1,314 @@
 use axum::{
-   extract::{Query, State},
-   routing::{get, post},
-   Json, Router,
+    extract::{Query, State},
+    routing::{get, post},
+    Json, Router,
 };
+use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 use uuid::Uuid;
 
-use crate::{error::Result,
-   extractors::AuthenticatedUser,
-   models::{JobStatus, ProcessRequest, ProcessResponse},
-   services::content::extract_content,
-   AppState,
+use crate::{
+    auth::{AuthenticatedUser, TtsUser, check_free_tier_limit},
+    error::Result,
+    models::{JobStatus, ProcessRequest, ProcessResponse},
+    services::content::extract_content,
+    AppState,
 };
 
+#[derive(Debug, Deserialize)]
+struct TtsRequest {
+    text: String,
+    #[serde(default = "default_voice")]
+    voice: String,
+}
+
+fn default_voice() -> String {
+    "af_bella".to_string()
+}
+
+#[derive(Debug, Serialize)]
+struct TtsResponse {
+    job_id: String,
+    status: JobStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    estimated_cost: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    free_tier_remaining: Option<i32>,
+}
+
+const VALID_VOICES: &[&str] = &[
+    "af_alloy", "af_aoede", "af_bella", "af_heart", "af_jessica", "af_kore",
+    "af_nicole", "af_nova", "af_river", "af_sarah", "af_sky",
+    "am_adam", "am_echo", "am_eric", "am_fenrir", "am_liam", "am_michael",
+    "am_onyx", "am_puck", "am_santa",
+    "bf_alice", "bf_emma", "bf_isabella", "bf_lily",
+    "bm_daniel", "bm_fable", "bm_george", "bm_lewis",
+    "ef_dora", "em_alex", "em_santa", "ff_siwis",
+    "hf_alpha", "hf_beta", "hm_omega", "hm_psi",
+    "if_sara", "im_nicola",
+    "jf_alpha", "jf_gongitsune", "jf_nezumi", "jf_tebukuro", "jm_kumo",
+    "pf_dora", "pm_alex", "pm_santa",
+    "zf_xiaobei", "zf_xiaoni", "zf_xiaoxiao", "zf_xiaoyi",
+    "zm_yunjian", "zm_yunxi", "zm_yunxia", "zm_yunyang",
+];
+
 pub fn routes() -> Router<Arc<AppState>> {
-   Router::new()
-       .route("/process", post(process))
-       .route("/status", get(status))
+    Router::new()
+        .route("/process", post(process))
+        .route("/tts", post(tts))
+        .route("/extract", post(extract))
+        .route("/status", get(status))
+        .route("/voices", get(list_voices))
+}
+
+async fn list_voices() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "voices": VALID_VOICES,
+        "default": "af_bella",
+        "categories": {
+            "american_female": ["af_alloy", "af_aoede", "af_bella", "af_heart", "af_jessica", "af_kore", "af_nicole", "af_nova", "af_river", "af_sarah", "af_sky"],
+            "american_male": ["am_adam", "am_echo", "am_eric", "am_fenrir", "am_liam", "am_michael", "am_onyx", "am_puck", "am_santa"],
+            "british_female": ["bf_alice", "bf_emma", "bf_isabella", "bf_lily"],
+            "british_male": ["bm_daniel", "bm_fable", "bm_george", "bm_lewis"],
+            "japanese": ["jf_alpha", "jf_gongitsune", "jf_nezumi", "jf_tebukuro", "jm_kumo"],
+            "chinese": ["zf_xiaobei", "zf_xiaoni", "zf_xiaoxiao", "zf_xiaoyi", "zm_yunjian", "zm_yunxi", "zm_yunxia", "zm_yunyang"]
+        }
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct ExtractRequest {
+    url: String,
+    #[serde(default)]
+    selector: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ExtractResponse {
+    text: String,
+    char_count: usize,
+    word_count: usize,
+}
+
+async fn extract(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ExtractRequest>,
+) -> Result<Json<ExtractResponse>> {
+    let content = extract_content(&state, &req.url, req.selector.as_deref()).await?;
+    let word_count = content.split_whitespace().count();
+
+    Ok(Json(ExtractResponse {
+        char_count: content.len(),
+        word_count,
+        text: content,
+    }))
 }
 
 async fn process(
-   State(state): State<Arc<AppState>>,
-   AuthenticatedUser(api_key): AuthenticatedUser,
-   Json(req): Json<ProcessRequest>,
+    State(state): State<Arc<AppState>>,
+    user: AuthenticatedUser,
+    Json(req): Json<ProcessRequest>,
 ) -> Result<Json<ProcessResponse>> {
-   let content = extract_content(&state, &req.url, req.selector.as_deref()).await?;
-   let estimated_cost = (content.len() as f64) * state.config.cost_per_char;
+    let content = extract_content(&state, &req.url, req.selector.as_deref()).await?;
+    let estimated_cost = (content.len() as f64) * state.config.cost_per_char;
 
-   if api_key.balance < estimated_cost {
-       return Err(crate::error::ApiError::InsufficientBalance);
-   }
+    // Check balance from database
+    let balance = sqlx::query_scalar!(
+        "SELECT balance FROM account_credits WHERE account_id = $1",
+        user.account_id
+    )
+    .fetch_optional(&state.db)
+    .await?
+    .unwrap_or(0.0);
 
-   let job_id = Uuid::new_v4().to_string();
-   
-   sqlx::query!(
-       "INSERT INTO jobs (id, api_key, text_content, status) VALUES ($1, $2, $3, 'queued')",
-       job_id,
-       api_key.key,
-       content.as_str()
-   )
-   .execute(&state.db)
-   .await?;
-   
-   // Insert directly into jobs table
-   sqlx::query!(
-   )
-   .execute(&state.db)
-   .await?;
+    if balance < estimated_cost {
+        return Err(crate::error::ApiError::InsufficientBalance);
+    }
 
-   Ok(Json(ProcessResponse {
-       job_id,
-       status: JobStatus::Queued,
-       estimated_cost,
-   }))
+    let job_id = Uuid::new_v4().to_string();
+
+    // Atomically reserve balance and create job
+    let mut tx = state.db.begin().await?;
+
+    let rows_affected = sqlx::query!(
+        "UPDATE account_credits SET balance = balance - $1 WHERE account_id = $2 AND balance >= $1",
+        estimated_cost,
+        user.account_id
+    )
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+
+    if rows_affected == 0 {
+        return Err(crate::error::ApiError::InsufficientBalance);
+    }
+
+    sqlx::query!(
+        "INSERT INTO jobs (id, api_key, text_content, status, cost) VALUES ($1, $2, $3, 'queued', $4)",
+        job_id,
+        user.api_key,
+        content.as_str(),
+        estimated_cost
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    Ok(Json(ProcessResponse {
+        job_id,
+        status: JobStatus::Queued,
+        estimated_cost,
+    }))
+}
+
+async fn tts(
+    State(state): State<Arc<AppState>>,
+    user: TtsUser,
+    Json(req): Json<TtsRequest>,
+) -> Result<Json<TtsResponse>> {
+    let text = req.text.trim();
+
+    if text.is_empty() {
+        return Err(crate::error::ApiError::InvalidRequestError);
+    }
+
+    // free tier gets smaller limit
+    let max_size = if user.is_free_tier() {
+        1000
+    } else {
+        state.config.max_content_size
+    };
+
+    if text.len() > max_size {
+        return Err(crate::error::ApiError::ContentTooLarge);
+    }
+
+    // validate voice
+    let voice = if VALID_VOICES.contains(&req.voice.as_str()) {
+        req.voice.clone()
+    } else {
+        default_voice()
+    };
+
+    let job_id = Uuid::new_v4().to_string();
+    let char_count = text.len() as i32;
+
+    match user {
+        TtsUser::Authenticated(auth_user) => {
+            let estimated_cost = (text.len() as f64) * state.config.cost_per_char;
+
+            let balance = sqlx::query_scalar!(
+                "SELECT balance FROM account_credits WHERE account_id = $1",
+                auth_user.account_id
+            )
+            .fetch_optional(&state.db)
+            .await?
+            .unwrap_or(0.0);
+
+            if balance < estimated_cost {
+                return Err(crate::error::ApiError::InsufficientBalance);
+            }
+
+            let mut tx = state.db.begin().await?;
+
+            let rows_affected = sqlx::query!(
+                "UPDATE account_credits SET balance = balance - $1 WHERE account_id = $2 AND balance >= $1",
+                estimated_cost,
+                auth_user.account_id
+            )
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+
+            if rows_affected == 0 {
+                return Err(crate::error::ApiError::InsufficientBalance);
+            }
+
+            sqlx::query!(
+                "INSERT INTO jobs (id, api_key, text_content, voice, status, cost, is_free_tier) VALUES ($1, $2, $3, $4, 'queued', $5, FALSE)",
+                job_id,
+                auth_user.api_key,
+                text,
+                voice,
+                estimated_cost
+            )
+            .execute(&mut *tx)
+            .await?;
+
+            tx.commit().await?;
+
+            Ok(Json(TtsResponse {
+                job_id,
+                status: JobStatus::Queued,
+                estimated_cost: Some(estimated_cost),
+                free_tier_remaining: None,
+            }))
+        }
+
+        TtsUser::FreeTier { ip_hash } => {
+            // check and consume free tier allowance
+            let remaining = check_free_tier_limit(&state.db, &ip_hash, char_count).await?;
+
+            let mut tx = state.db.begin().await?;
+
+            // consume the chars
+            sqlx::query!(
+                "UPDATE free_tier_usage SET chars_used = chars_used + $1 WHERE ip_hash = $2",
+                char_count,
+                ip_hash
+            )
+            .execute(&mut *tx)
+            .await?;
+
+            // create job with ip_hash instead of api_key
+            sqlx::query!(
+                "INSERT INTO jobs (id, ip_hash, text_content, voice, status, cost, is_free_tier) VALUES ($1, $2, $3, $4, 'queued', 0, TRUE)",
+                job_id,
+                ip_hash,
+                text,
+                voice
+            )
+            .execute(&mut *tx)
+            .await?;
+
+            tx.commit().await?;
+
+            Ok(Json(TtsResponse {
+                job_id,
+                status: JobStatus::Queued,
+                estimated_cost: None,
+                free_tier_remaining: Some(remaining - char_count),
+            }))
+        }
+    }
 }
 
 async fn status(
-   State(state): State<Arc<AppState>>,
-   Query(params): Query<HashMap<String, String>>,
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<JobStatus>> {
-   let job_id = params
-       .get("job_id")
-       .ok_or(crate::error::ApiError::NotFound)?;
+    let job_id = params
+        .get("job_id")
+        .ok_or(crate::error::ApiError::InvalidRequestError)?;
 
-   let job = sqlx::query!(
-       "SELECT status FROM jobs WHERE id = $1",
-       job_id
-   )
-   .fetch_optional(&state.db)
-   .await?;
-   
-   match job {
-       Some(j) => match j.status.as_deref() {
-           Some("completed") => Ok(Json(JobStatus::Complete { 
-               url: format!("https://storage.sonotxt.com/audio/{}.mp3", job_id),
-               duration_seconds: 0.0 
-           })),
-           Some("failed") => Ok(Json(JobStatus::Failed { reason: "Processing failed".into() })),
-           _ => Ok(Json(JobStatus::Queued)),
-       },
-       None => Ok(Json(JobStatus::Queued))
-   }
+    let job = sqlx::query!(
+        "SELECT status, audio_url, duration_seconds, error_message FROM jobs WHERE id = $1",
+        job_id
+    )
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(crate::error::ApiError::NotFound)?;
+
+    match job.status.as_str() {
+        "completed" => Ok(Json(JobStatus::Complete {
+            url: job.audio_url.unwrap_or_default(),
+            duration_seconds: job.duration_seconds.unwrap_or(0.0),
+        })),
+        "failed" => Ok(Json(JobStatus::Failed {
+            reason: job.error_message.unwrap_or_else(|| "Processing failed".into()),
+        })),
+        "processing" => Ok(Json(JobStatus::Processing { progress: 50 })),
+        _ => Ok(Json(JobStatus::Queued)),
+    }
 }

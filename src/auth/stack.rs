@@ -40,14 +40,14 @@ impl FromRequestParts<std::sync::Arc<crate::AppState>> for StackAuthUser {
             .bearer_auth(bearer.token())
             .send()
             .await
-            .map_err(|_| crate::error::ApiError::Internal)?;
+            .map_err(|_| crate::error::ApiError::InternalError)?;
 
         if !res.status().is_success() {
             return Err(crate::error::ApiError::InvalidApiKey);
         }
 
         let user: StackUser = res.json().await
-            .map_err(|_| crate::error::ApiError::Internal)?;
+            .map_err(|_| crate::error::ApiError::InternalError)?;
 
         Ok(StackAuthUser(user))
     }

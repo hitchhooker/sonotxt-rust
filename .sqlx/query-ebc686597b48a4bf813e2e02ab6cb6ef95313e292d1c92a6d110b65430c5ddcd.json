@@ -1,0 +1,50 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO sites (account_id, url, selector, auto_crawl, crawl_frequency_hours)\n        VALUES ($1, $2, $3, $4, $5)\n        RETURNING id, url, selector, auto_crawl, last_crawled_at\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 1,
+        "name": "url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "selector",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "auto_crawl",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 4,
+        "name": "last_crawled_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Bool",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "ebc686597b48a4bf813e2e02ab6cb6ef95313e292d1c92a6d110b65430c5ddcd"
+}

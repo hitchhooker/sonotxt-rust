@@ -1,28 +1,4 @@
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ApiKey {
-    pub key: String,
-    pub account_id: Uuid,
-    pub balance: f64,
-    pub created_at: DateTime<Utc>,
-    #[serde(default)]
-    pub monthly_usage: f64,
-}
-
-impl ApiKey {
-    pub fn new(account_id: Uuid, balance: f64) -> Self {
-        Self {
-            key: Uuid::new_v4().to_string(),
-            account_id,
-            balance,
-            created_at: Utc::now(),
-            monthly_usage: 0.0,
-        }
-    }
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ProcessRequest {

@@ -33,7 +33,7 @@ pub async fn estimate_cost(
         account_id
     )
     .fetch_optional(&state.db)
-    .await.map_err(|_| ApiError::Internal)?
+    .await.map_err(|_| ApiError::InternalError)?
     .ok_or(ApiError::NotFound)?;
     
     let is_active_subscriber = account.subscription_type.is_some() && 
@@ -42,7 +42,7 @@ pub async fn estimate_cost(
     let base_rate = if is_active_subscriber { 0.06 } else { 0.10 };
     let mut cost = request.minutes * base_rate;
     
-    let watermark = if is_active_subscriber || account.watermark_free.unwrap_or(false) {
+    let watermark = if is_active_subscriber || account.watermark_free {
         false
     } else if request.remove_watermark {
         cost += request.minutes * 0.03;
@@ -79,7 +79,7 @@ pub async fn charge_for_tts(
     request: &TtsRequest,
     content_id: Uuid,
 ) -> Result<PricingEstimate> {
-    let estimate = estimate_cost(state, account_id, request).await.map_err(|_| ApiError::Internal)?;
+    let estimate = estimate_cost(state, account_id, request).await.map_err(|_| ApiError::InternalError)?;
     
     // Check balance
     let balance = sqlx::query_scalar!(
@@ -87,14 +87,14 @@ pub async fn charge_for_tts(
         account_id
     )
     .fetch_one(&state.db)
-    .await.map_err(|_| ApiError::Internal)?;
+    .await.map_err(|_| ApiError::InternalError)?;
     
-    if balance.unwrap_or(0.0) < estimate.cost {
+    if balance < estimate.cost {
         return Err(ApiError::InsufficientBalance);
     }
     
     // Start transaction
-    let mut tx = state.db.begin().await.map_err(|_| ApiError::Internal)?;
+    let mut tx = state.db.begin().await.map_err(|_| ApiError::InternalError)?;
     
     // Deduct credits
     sqlx::query!(
@@ -107,7 +107,7 @@ pub async fn charge_for_tts(
         account_id
     )
     .execute(&mut *tx)
-    .await.map_err(|_| ApiError::Internal)?;
+    .await.map_err(|_| ApiError::InternalError)?;
     
     // Log transaction
     sqlx::query!(
@@ -120,9 +120,9 @@ pub async fn charge_for_tts(
         format!("TTS: {:.1} minutes for content {}", request.minutes, content_id)
     )
     .execute(&mut *tx)
-    .await.map_err(|_| ApiError::Internal)?;
+    .await.map_err(|_| ApiError::InternalError)?;
     
-    tx.commit().await.map_err(|_| ApiError::Internal)?;
+    tx.commit().await.map_err(|_| ApiError::InternalError)?;
     
     Ok(estimate)
 }
@@ -133,7 +133,7 @@ pub async fn add_credits(
     amount: f64,
     stripe_payment_id: Option<String>,
 ) -> Result<f64> {
-    let mut tx = state.db.begin().await.map_err(|_| ApiError::Internal)?;
+    let mut tx = state.db.begin().await.map_err(|_| ApiError::InternalError)?;
     
     // Update balance
     let new_balance = sqlx::query_scalar!(
@@ -147,7 +147,7 @@ pub async fn add_credits(
         account_id
     )
     .fetch_one(&mut *tx)
-    .await.map_err(|_| ApiError::Internal)?;
+    .await.map_err(|_| ApiError::InternalError)?;
     
     // Log transaction
     sqlx::query!(
@@ -161,11 +161,11 @@ pub async fn add_credits(
         stripe_payment_id
     )
     .execute(&mut *tx)
-    .await.map_err(|_| ApiError::Internal)?;
+    .await.map_err(|_| ApiError::InternalError)?;
     
-    tx.commit().await.map_err(|_| ApiError::Internal)?;
+    tx.commit().await.map_err(|_| ApiError::InternalError)?;
     
-    Ok(new_balance.unwrap_or(0.0))
+    Ok(new_balance)
 }
 
 pub async fn activate_subscription(
@@ -177,12 +177,12 @@ pub async fn activate_subscription(
     let (credits, months) = match plan {
         "monthly" => (15.0, 1),
         "yearly" => (180.0, 12), // 12 * 15
-        _ => return Err(ApiError::InvalidRequest),
+        _ => return Err(ApiError::InvalidRequestError),
     };
     
     let expires = Utc::now() + Duration::days(30 * months);
     
-    let mut tx = state.db.begin().await.map_err(|_| ApiError::Internal)?;
+    let mut tx = state.db.begin().await.map_err(|_| ApiError::InternalError)?;
     
     // Update subscription
     sqlx::query!(
@@ -204,7 +204,7 @@ pub async fn activate_subscription(
         account_id
     )
     .execute(&mut *tx)
-    .await.map_err(|_| ApiError::Internal)?;
+    .await.map_err(|_| ApiError::InternalError)?;
     
     // Log transaction
     sqlx::query!(
@@ -217,9 +217,9 @@ pub async fn activate_subscription(
         format!("{} subscription: ${:.2} credits + no watermark", plan, credits)
     )
     .execute(&mut *tx)
-    .await.map_err(|_| ApiError::Internal)?;
+    .await.map_err(|_| ApiError::InternalError)?;
     
-    tx.commit().await.map_err(|_| ApiError::Internal)?;
+    tx.commit().await.map_err(|_| ApiError::InternalError)?;
     
     Ok(())
 }
@@ -236,7 +236,7 @@ pub async fn check_subscription_expiry(state: &AppState) -> Result<()> {
         "#
     )
     .execute(&state.db)
-    .await.map_err(|_| ApiError::Internal)?;
+    .await.map_err(|_| ApiError::InternalError)?;
     
     Ok(())
 }

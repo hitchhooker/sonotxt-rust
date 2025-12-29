@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO free_tier_usage (ip_hash, chars_used, last_reset)\n        VALUES ($1, 0, CURRENT_DATE)\n        ON CONFLICT (ip_hash) DO UPDATE\n        SET chars_used = CASE\n            WHEN free_tier_usage.last_reset < CURRENT_DATE THEN 0\n            ELSE free_tier_usage.chars_used\n        END,\n        last_reset = CURRENT_DATE\n        RETURNING chars_used\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "chars_used",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "2831229ce3e705d284827e0a4f970a79095cb727cccc955f8cf79e474e7afe2e"
+}

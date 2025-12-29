@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO transactions (account_id, amount, type, description, stripe_payment_id)\n        VALUES ($1, $2, 'purchase', $3, $4)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Float8",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "59b7a82e05d35333b03b1c402961baeca813ad33cef24e2a3ee69f584aa4138f"
+}

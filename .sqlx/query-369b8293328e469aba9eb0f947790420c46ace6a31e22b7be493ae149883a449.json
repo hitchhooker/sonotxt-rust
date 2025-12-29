@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO jobs (id, api_key, text_content, status, cost) VALUES ($1, $2, $3, 'queued', $4)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Float8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "369b8293328e469aba9eb0f947790420c46ace6a31e22b7be493ae149883a449"
+}

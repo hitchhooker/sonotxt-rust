@@ -1,3 +1,9 @@
+pub mod auth;
+pub mod billing;
 pub mod content;
 pub mod crawler;
-pub mod billing;
+pub mod crypto;
+pub mod payments;
+pub mod seed_manager;
+pub mod tpm;
+pub mod wallet;

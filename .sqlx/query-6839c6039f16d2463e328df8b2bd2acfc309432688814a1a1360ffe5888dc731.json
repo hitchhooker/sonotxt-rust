@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE account_credits \n        SET balance = balance - $1, updated_at = NOW()\n        WHERE account_id = $2\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Float8",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6839c6039f16d2463e328df8b2bd2acfc309432688814a1a1360ffe5888dc731"
+}

@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE account_credits \n        SET \n            subscription_type = $1,\n            subscription_expires = $2,\n            watermark_free = true,\n            stripe_subscription_id = $3,\n            balance = balance + $4,\n            updated_at = NOW()\n        WHERE account_id = $5\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Timestamptz",
+        "Text",
+        "Float8",
+        "Uuid"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1c24ca1e1f938303dcce052401e25a23ebbc6902fedad9338003ee4457714dc0"
+}

@@ -33,7 +33,7 @@ async fn create_api_key(
         .arg(serde_json::to_string(&api_key).unwrap())
         .query_async::<_, ()>(&mut redis)
         .await
-        .map_err(|_| crate::error::ApiError::Internal)?;
+        .map_err(|_| crate::error::ApiError::InternalError)?;
     
     Ok(Json(api_key))
 }

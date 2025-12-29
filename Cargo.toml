@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 axum = "0.7"
 axum-extra = { version = "0.9", features = ["typed-header"] }
+headers = "0.4"
 tokio = { version = "1", features = ["full"] }
 tower = "0.4"
 tower-http = { version = "0.5", features = ["cors", "limit", "timeout", "trace"] }
@@ -13,7 +14,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 blake3 = "1.5"
 redis = { version = "0.25", features = ["tokio-comp", "connection-manager"] }
-reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.11", default-features = false, features = ["rustls-tls", "json"] }
 scraper = "0.19"
 url = "2.5"
 thiserror = "1"
@@ -24,3 +25,21 @@ chrono = { version = "0.4", features = ["serde"] }
 dotenvy = "0.15"
 clap = { version = "4", features = ["derive", "env"] }
 sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono"] }
+subtle = "2.5"
+aws-sdk-s3 = "1.65"
+aws-config = { version = "1.5", features = ["behavior-version-latest"] }
+aws-credential-types = "1.2"
+base64 = "0.22"
+rand = "0.8"
+hex = "0.4"
+
+# stripe webhook verification
+hmac = "0.12"
+sha2 = "0.10"
+
+# hardware-secured payment processor
+hwpay = { path = "../../hwpay", features = ["penumbra"] }
+secrecy = "0.10"
+
+[dev-dependencies]
+tempfile = "3"

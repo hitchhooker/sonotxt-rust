@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE account_credits \n        SET \n            subscription_type = NULL,\n            watermark_free = false\n        WHERE subscription_expires < NOW()\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "ace91867d406e7e76759022e8a74ab501a15e99c5b337b81d696f58897de86bd"
+}

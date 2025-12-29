@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE jobs\n        SET status = 'queued'\n        WHERE status = 'processing'\n        AND created_at < NOW() - INTERVAL '5 minutes'\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "03643039b715fc3c0b135054f343970ad5be4f1ca82950397811944094aaf5b9"
+}

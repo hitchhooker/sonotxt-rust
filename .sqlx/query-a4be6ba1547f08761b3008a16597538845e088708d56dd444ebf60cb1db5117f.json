@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO account_credits (account_id, balance)\n        VALUES ($1, $2)\n        ON CONFLICT (account_id) DO UPDATE SET balance = account_credits.balance + $2\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Float8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a4be6ba1547f08761b3008a16597538845e088708d56dd444ebf60cb1db5117f"
+}

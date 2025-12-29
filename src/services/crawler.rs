@@ -5,8 +5,8 @@ pub async fn crawl_site(
     url: &str,
     selector: Option<&str>,
 ) -> Result<String> {
-    let response = reqwest::get(url).await.map_err(|_| crate::error::ApiError::Internal)?;
-    let html = response.text().await.map_err(|_| crate::error::ApiError::Internal)?;
+    let response = reqwest::get(url).await.map_err(|_| crate::error::ApiError::InternalError)?;
+    let html = response.text().await.map_err(|_| crate::error::ApiError::InternalError)?;
     let document = Html::parse_document(&html);
     
     // Use main content selector or fallback to article/main/body

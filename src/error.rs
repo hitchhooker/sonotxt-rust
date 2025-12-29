@@ -9,53 +9,73 @@ use serde_json::json;
 pub enum ApiError {
     #[error("Invalid API key")]
     InvalidApiKey,
-    
+
     #[error("Insufficient balance")]
     InsufficientBalance,
-    
+
+    #[error("Free tier limit exceeded: {remaining} of {limit} chars remaining today")]
+    FreeTierLimitExceeded { remaining: i32, limit: i32 },
+
     #[error("Invalid URL")]
     InvalidUrl,
-    
+
     #[error("Content too large")]
     ContentTooLarge,
-    
+
     #[error("Processing failed")]
     ProcessingFailed,
-    
+
     #[error("Not found")]
     NotFound,
-    
+
     #[error("Unauthorized")]
     Unauthorized,
-    
+
     #[error("Internal error")]
-    Internal,
+    InternalError,
+
+    #[error("Internal error: {0}")]
+    Internal(String),
 
     #[error("Invalid request")]
-    InvalidRequest,
+    InvalidRequestError,
+
+    #[error("Invalid request: {0}")]
+    InvalidRequest(String),
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let (status, message) = match self {
-            ApiError::InvalidApiKey => (StatusCode::UNAUTHORIZED, self.to_string()),
-            ApiError::InsufficientBalance => (StatusCode::PAYMENT_REQUIRED, self.to_string()),
-            ApiError::InvalidUrl => (StatusCode::BAD_REQUEST, self.to_string()),
-            ApiError::ContentTooLarge => (StatusCode::PAYLOAD_TOO_LARGE, self.to_string()),
-            ApiError::ProcessingFailed => (StatusCode::UNPROCESSABLE_ENTITY, self.to_string()),
-            ApiError::NotFound => (StatusCode::NOT_FOUND, self.to_string()),
-            ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, self.to_string()),
-            ApiError::InvalidRequest => (StatusCode::BAD_REQUEST, self.to_string()),
-            ApiError::Internal => (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string()),
+        let (status, body) = match &self {
+            ApiError::InvalidApiKey => (StatusCode::UNAUTHORIZED, json!({ "error": self.to_string() })),
+            ApiError::InsufficientBalance => (StatusCode::PAYMENT_REQUIRED, json!({ "error": self.to_string() })),
+            ApiError::FreeTierLimitExceeded { remaining, limit } => (
+                StatusCode::TOO_MANY_REQUESTS,
+                json!({
+                    "error": self.to_string(),
+                    "remaining": remaining,
+                    "limit": limit,
+                    "hint": "sign up for an api key at app.sonotxt.com for more"
+                })
+            ),
+            ApiError::InvalidUrl => (StatusCode::BAD_REQUEST, json!({ "error": self.to_string() })),
+            ApiError::ContentTooLarge => (StatusCode::PAYLOAD_TOO_LARGE, json!({ "error": self.to_string() })),
+            ApiError::ProcessingFailed => (StatusCode::UNPROCESSABLE_ENTITY, json!({ "error": self.to_string() })),
+            ApiError::NotFound => (StatusCode::NOT_FOUND, json!({ "error": self.to_string() })),
+            ApiError::Unauthorized => (StatusCode::UNAUTHORIZED, json!({ "error": self.to_string() })),
+            ApiError::InternalError => (StatusCode::INTERNAL_SERVER_ERROR, json!({ "error": self.to_string() })),
+            ApiError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, json!({ "error": self.to_string() })),
+            ApiError::InvalidRequestError => (StatusCode::BAD_REQUEST, json!({ "error": self.to_string() })),
+            ApiError::InvalidRequest(_) => (StatusCode::BAD_REQUEST, json!({ "error": self.to_string() })),
         };
-        
-        (status, Json(json!({ "error": message }))).into_response()
+
+        (status, Json(body)).into_response()
     }
 }
 
 impl From<sqlx::Error> for ApiError {
     fn from(_: sqlx::Error) -> Self {
-        ApiError::Internal
+        ApiError::InternalError
     }
 }
 

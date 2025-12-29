@@ -19,12 +19,12 @@ pub async fn extract_content(
         .timeout(std::time::Duration::from_secs(10))
         .send()
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|_| ApiError::InternalError)?;
 
     let html = response
         .text()
         .await
-        .map_err(|_| ApiError::Internal)?;
+        .map_err(|_| ApiError::InternalError)?;
 
     if html.len() > state.config.max_content_size * 2 {
         return Err(ApiError::ContentTooLarge);

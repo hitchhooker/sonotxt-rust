@@ -1,4 +1,4 @@
-use sonotxt::{build_app, AppState, Config};
+use sonotxt::{build_app, worker, AppState, Config};
 use std::sync::Arc;
 
 #[tokio::main]
@@ -21,12 +21,11 @@ async fn main() {
         .connect(&config.database_url)
         .await
         .expect("Database connection failed");
-    
-    // Skip migrations - tables already exist
-    // sqlx::migrate!("./migrations")
-    //     .run(&db)
-    //     .await
-    //     .expect("Failed to run migrations");
+
+    sqlx::migrate!("./migrations")
+        .run(&db)
+        .await
+        .expect("Failed to run migrations");
     
     let http = reqwest::Client::builder()
         .user_agent("SonoTxt/1.0")
@@ -40,9 +39,15 @@ async fn main() {
         http,
         db,
     });
-    
+
+    // Spawn TTS worker
+    let worker_state = state.clone();
+    tokio::spawn(async move {
+        worker::run_worker(worker_state).await;
+    });
+
     let app = build_app(state);
-    
+
     let addr = format!("{}:{}", config.host, config.port);
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
@@ -50,7 +55,10 @@ async fn main() {
     
     tracing::info!("Server running on {}", addr);
     
-    axum::serve(listener, app)
-        .await
-        .expect("Server failed");
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>()
+    )
+    .await
+    .expect("Server failed");
 }
