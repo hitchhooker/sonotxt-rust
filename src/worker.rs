@@ -21,6 +21,7 @@ struct KokoroRequest {
 struct KokoroResponse {
     audio: Option<String>,
     inference_status: Option<InferenceStatus>,
+    request_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -183,12 +184,13 @@ async fn process_next_job(state: &Arc<AppState>, s3_client: &S3Client) -> Result
 
     // Call Kokoro TTS
     match generate_tts_kokoro(state, &text, voice).await {
-        Ok((audio_data, duration_seconds)) => {
-            // Upload to MinIO (WAV format from DeepInfra)
-            let filename = format!("{}.wav", job.id);
-            match upload_audio(s3_client, &filename, &audio_data, "audio/wav").await {
+        Ok(result) => {
+            // Upload to MinIO (MP3 format from DeepInfra)
+            let filename = format!("{}.mp3", job.id);
+            match upload_audio(s3_client, &filename, &result.audio_data, "audio/mpeg").await {
                 Ok(_) => {
                     let audio_url = format!("{}/{}", state.config.audio_public_url, filename);
+                    let runtime_ms = result.runtime_ms.map(|ms| ms as i32);
 
                     sqlx::query!(
                         r#"
@@ -196,11 +198,17 @@ async fn process_next_job(state: &Arc<AppState>, s3_client: &S3Client) -> Result
                         SET status = 'completed',
                             audio_url = $1,
                             duration_seconds = $2,
+                            actual_runtime_ms = $3,
+                            deepinfra_cost = $4,
+                            deepinfra_request_id = $5,
                             completed_at = NOW()
-                        WHERE id = $3
+                        WHERE id = $6
                         "#,
                         audio_url,
-                        duration_seconds,
+                        result.duration_seconds,
+                        runtime_ms,
+                        result.cost,
+                        result.request_id,
                         job.id
                     )
                     .execute(&state.db)
@@ -208,10 +216,12 @@ async fn process_next_job(state: &Arc<AppState>, s3_client: &S3Client) -> Result
                     .map_err(|_| crate::error::ApiError::InternalError)?;
 
                     info!(
-                        "Job {} completed: {:.1}s audio, {} bytes",
+                        "Job {} completed: {:.1}s audio, {} bytes, runtime {}ms, cost ${:.6}",
                         job.id,
-                        duration_seconds,
-                        audio_data.len()
+                        result.duration_seconds,
+                        result.audio_data.len(),
+                        result.runtime_ms.unwrap_or(0),
+                        result.cost.unwrap_or(0.0)
                     );
                 }
                 Err(e) => {
@@ -229,7 +239,15 @@ async fn process_next_job(state: &Arc<AppState>, s3_client: &S3Client) -> Result
     Ok(())
 }
 
-async fn generate_tts_kokoro(state: &AppState, text: &str, voice: &str) -> Result<(Vec<u8>, f64)> {
+struct TtsResult {
+    audio_data: Vec<u8>,
+    duration_seconds: f64,
+    runtime_ms: Option<i64>,
+    cost: Option<f64>,
+    request_id: Option<String>,
+}
+
+async fn generate_tts_kokoro(state: &AppState, text: &str, voice: &str) -> Result<TtsResult> {
     let token = state
         .config
         .deepinfra_token
@@ -268,6 +286,12 @@ async fn generate_tts_kokoro(state: &AppState, text: &str, voice: &str) -> Resul
         crate::error::ApiError::ProcessingFailed
     })?;
 
+    // Extract deepinfra stats
+    let (runtime_ms, cost) = kokoro_response
+        .inference_status
+        .map(|s| (s.runtime_ms, s.cost))
+        .unwrap_or((None, None));
+
     let audio_data_url = kokoro_response
         .audio
         .ok_or(crate::error::ApiError::ProcessingFailed)?;
@@ -283,10 +307,16 @@ async fn generate_tts_kokoro(state: &AppState, text: &str, voice: &str) -> Resul
         crate::error::ApiError::ProcessingFailed
     })?;
 
-    // Estimate duration based on audio size (MP3 ~128kbps = 16KB/sec, WAV ~176KB/sec for 44.1kHz 16-bit stereo)
-    let duration_seconds = audio_data.len() as f64 / 88200.0; // WAV mono 44.1kHz 16-bit
+    // Estimate duration based on audio size (MP3 ~64kbps = 8KB/sec for 24kHz mono)
+    let duration_seconds = audio_data.len() as f64 / 8000.0;
 
-    Ok((audio_data, duration_seconds))
+    Ok(TtsResult {
+        audio_data,
+        duration_seconds,
+        runtime_ms,
+        cost,
+        request_id: kokoro_response.request_id,
+    })
 }
 
 async fn upload_audio(client: &S3Client, filename: &str, data: &[u8], content_type: &str) -> Result<()> {

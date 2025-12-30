@@ -22,7 +22,7 @@ pub struct Config {
     #[arg(long, env = "MAX_CONTENT_SIZE", default_value = "50000")]
     pub max_content_size: usize,
 
-    #[arg(long, env = "REQUEST_TIMEOUT_SECS", default_value = "30")]
+    #[arg(long, env = "REQUEST_TIMEOUT_SECS", default_value = "120")]
     pub request_timeout: u64,
 
     #[arg(long, env = "S3_BUCKET", default_value = "sonotxt-audio")]

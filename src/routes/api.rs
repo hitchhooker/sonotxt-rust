@@ -157,7 +157,7 @@ async fn process(
 
     Ok(Json(ProcessResponse {
         job_id,
-        status: JobStatus::Queued,
+        status: JobStatus::Queued { position: None, estimated_seconds: None },
         estimated_cost,
     }))
 }
@@ -225,22 +225,27 @@ async fn tts(
                 return Err(crate::error::ApiError::InsufficientBalance);
             }
 
+            let estimated_duration_ms = (char_count as f64 * crate::models::MS_PER_CHAR) as i32;
+
             sqlx::query!(
-                "INSERT INTO jobs (id, api_key, text_content, voice, status, cost, is_free_tier) VALUES ($1, $2, $3, $4, 'queued', $5, FALSE)",
+                "INSERT INTO jobs (id, api_key, text_content, voice, status, cost, is_free_tier, char_count, estimated_duration_ms) VALUES ($1, $2, $3, $4, 'queued', $5, FALSE, $6, $7)",
                 job_id,
                 auth_user.api_key,
                 text,
                 voice,
-                estimated_cost
+                estimated_cost,
+                char_count,
+                estimated_duration_ms
             )
             .execute(&mut *tx)
             .await?;
 
             tx.commit().await?;
 
+            let estimated_seconds = estimated_duration_ms as f64 / 1000.0;
             Ok(Json(TtsResponse {
                 job_id,
-                status: JobStatus::Queued,
+                status: JobStatus::Queued { position: None, estimated_seconds: Some(estimated_seconds) },
                 estimated_cost: Some(estimated_cost),
                 free_tier_remaining: None,
             }))
@@ -261,22 +266,27 @@ async fn tts(
             .execute(&mut *tx)
             .await?;
 
+            let estimated_duration_ms = (char_count as f64 * crate::models::MS_PER_CHAR) as i32;
+
             // create job with ip_hash instead of api_key
             sqlx::query!(
-                "INSERT INTO jobs (id, ip_hash, text_content, voice, status, cost, is_free_tier) VALUES ($1, $2, $3, $4, 'queued', 0, TRUE)",
+                "INSERT INTO jobs (id, ip_hash, text_content, voice, status, cost, is_free_tier, char_count, estimated_duration_ms) VALUES ($1, $2, $3, $4, 'queued', 0, TRUE, $5, $6)",
                 job_id,
                 ip_hash,
                 text,
-                voice
+                voice,
+                char_count,
+                estimated_duration_ms
             )
             .execute(&mut *tx)
             .await?;
 
             tx.commit().await?;
 
+            let estimated_seconds = estimated_duration_ms as f64 / 1000.0;
             Ok(Json(TtsResponse {
                 job_id,
-                status: JobStatus::Queued,
+                status: JobStatus::Queued { position: None, estimated_seconds: Some(estimated_seconds) },
                 estimated_cost: None,
                 free_tier_remaining: Some(remaining - char_count),
             }))
@@ -293,22 +303,72 @@ async fn status(
         .ok_or(crate::error::ApiError::InvalidRequestError)?;
 
     let job = sqlx::query!(
-        "SELECT status, audio_url, duration_seconds, error_message FROM jobs WHERE id = $1",
+        r#"SELECT
+            status,
+            audio_url,
+            duration_seconds,
+            error_message,
+            estimated_duration_ms,
+            actual_runtime_ms,
+            deepinfra_cost,
+            started_at,
+            created_at
+        FROM jobs WHERE id = $1"#,
         job_id
     )
     .fetch_optional(&state.db)
     .await?
     .ok_or(crate::error::ApiError::NotFound)?;
 
+    let estimated_seconds = job.estimated_duration_ms.map(|ms| ms as f64 / 1000.0);
+
     match job.status.as_str() {
         "completed" => Ok(Json(JobStatus::Complete {
             url: job.audio_url.unwrap_or_default(),
             duration_seconds: job.duration_seconds.unwrap_or(0.0),
+            runtime_ms: job.actual_runtime_ms,
+            cost: job.deepinfra_cost,
         })),
         "failed" => Ok(Json(JobStatus::Failed {
             reason: job.error_message.unwrap_or_else(|| "Processing failed".into()),
         })),
-        "processing" => Ok(Json(JobStatus::Processing { progress: 50 })),
-        _ => Ok(Json(JobStatus::Queued)),
+        "processing" => {
+            // Calculate progress based on elapsed time vs estimated
+            let elapsed_seconds = job.started_at
+                .map(|started| {
+                    let now = chrono::Utc::now();
+                    (now - started).num_milliseconds() as f64 / 1000.0
+                });
+
+            let progress: u8 = match (elapsed_seconds, estimated_seconds) {
+                (Some(elapsed), Some(estimated)) if estimated > 0.0 => {
+                    let pct = ((elapsed / estimated) * 100.0).min(99.0) as u8;
+                    pct.max(1) // at least 1%
+                }
+                _ => 50, // fallback
+            };
+
+            Ok(Json(JobStatus::Processing {
+                progress,
+                elapsed_seconds,
+                estimated_seconds,
+            }))
+        }
+        "queued" => {
+            // Count position in queue
+            let position = sqlx::query_scalar!(
+                "SELECT COUNT(*) FROM jobs WHERE status = 'queued' AND created_at < $1",
+                job.created_at
+            )
+            .fetch_one(&state.db)
+            .await?
+            .map(|c| c as u32);
+
+            Ok(Json(JobStatus::Queued {
+                position,
+                estimated_seconds,
+            }))
+        }
+        _ => Ok(Json(JobStatus::Queued { position: None, estimated_seconds })),
     }
 }

@@ -1,0 +1,70 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n            status,\n            audio_url,\n            duration_seconds,\n            error_message,\n            estimated_duration_ms,\n            actual_runtime_ms,\n            deepinfra_cost,\n            started_at,\n            created_at\n        FROM jobs WHERE id = $1",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "audio_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "duration_seconds",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 3,
+        "name": "error_message",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "estimated_duration_ms",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "actual_runtime_ms",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 6,
+        "name": "deepinfra_cost",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 7,
+        "name": "started_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 8,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "eb3072971dfb5e8a98cfdca983722e0ecf656e217dbd458fc681b8f48c80a9cf"
+}

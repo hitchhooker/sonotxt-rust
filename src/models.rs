@@ -16,11 +16,32 @@ pub struct ProcessResponse {
     pub estimated_cost: f64,
 }
 
+// ~2.5ms per character based on deepinfra Kokoro benchmarks
+pub const MS_PER_CHAR: f64 = 2.5;
+
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "status")]
 pub enum JobStatus {
-    Queued,
-    Processing { progress: u8 },
-    Complete { url: String, duration_seconds: f64 },
+    Queued {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        position: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        estimated_seconds: Option<f64>,
+    },
+    Processing {
+        progress: u8,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        elapsed_seconds: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        estimated_seconds: Option<f64>,
+    },
+    Complete {
+        url: String,
+        duration_seconds: f64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        runtime_ms: Option<i32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cost: Option<f64>,
+    },
     Failed { reason: String },
 }
