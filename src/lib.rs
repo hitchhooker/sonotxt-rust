@@ -58,7 +58,8 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .nest("/api/auth", routes::user_auth::routes())
         .merge(routes::auth::routes())
         .merge(routes::admin::routes())
-        .merge(routes::ws::routes())  // WebSocket routes
+        .merge(routes::ws::routes())
+        .merge(routes::embed::routes())
         .layer(cors)
         .layer(RequestBodyLimitLayer::new(1024 * 1024))
         .layer(TimeoutLayer::new(std::time::Duration::from_secs(

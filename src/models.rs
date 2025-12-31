@@ -42,6 +42,10 @@ pub enum JobStatus {
         runtime_ms: Option<i32>,
         #[serde(skip_serializing_if = "Option::is_none")]
         cost: Option<f64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        storage_type: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ipfs_cid: Option<String>,
     },
     Failed { reason: String },
 }

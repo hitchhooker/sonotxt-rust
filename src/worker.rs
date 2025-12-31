@@ -1,6 +1,4 @@
-use crate::{error::Result, AppState};
-use aws_credential_types::Credentials;
-use aws_sdk_s3::{config::Region, primitives::ByteStream, Client as S3Client};
+use crate::{error::Result, services::storage::{StorageBackend, StorageService}, AppState};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -38,11 +36,11 @@ pub async fn run_worker(state: Arc<AppState>) {
         warn!("DEEPINFRA_TOKEN not set - TTS will fail");
     }
 
-    // Initialize S3 client for MinIO
-    let s3_client = create_s3_client(&state).await;
+    // Initialize storage service
+    let storage = StorageService::new(state.config.clone()).await;
 
-    // Ensure bucket exists
-    if let Err(e) = ensure_bucket_exists(&s3_client).await {
+    // Ensure bucket exists (for minio)
+    if let Err(e) = storage.ensure_bucket_exists().await {
         error!("Failed to create audio bucket: {:?}", e);
     }
 
@@ -52,7 +50,7 @@ pub async fn run_worker(state: Arc<AppState>) {
     }
 
     loop {
-        if let Err(e) = process_next_job(&state, &s3_client).await {
+        if let Err(e) = process_next_job(&state, &storage).await {
             error!("Worker error: {:?}", e);
         }
 
@@ -60,63 +58,6 @@ pub async fn run_worker(state: Arc<AppState>) {
     }
 }
 
-async fn create_s3_client(state: &AppState) -> S3Client {
-    let creds = Credentials::new(
-        &state.config.minio_access_key,
-        &state.config.minio_secret_key,
-        None,
-        None,
-        "minio",
-    );
-
-    let config = aws_sdk_s3::Config::builder()
-        .behavior_version_latest()
-        .region(Region::new("us-east-1"))
-        .endpoint_url(&state.config.minio_endpoint)
-        .credentials_provider(creds)
-        .force_path_style(true)
-        .build();
-
-    S3Client::from_conf(config)
-}
-
-async fn ensure_bucket_exists(client: &S3Client) -> Result<()> {
-    let bucket = "sonotxt-audio";
-
-    match client.head_bucket().bucket(bucket).send().await {
-        Ok(_) => Ok(()),
-        Err(_) => {
-            client
-                .create_bucket()
-                .bucket(bucket)
-                .send()
-                .await
-                .map_err(|_| crate::error::ApiError::InternalError)?;
-
-            // Set bucket policy for public read
-            let policy = serde_json::json!({
-                "Version": "2012-10-17",
-                "Statement": [{
-                    "Effect": "Allow",
-                    "Principal": "*",
-                    "Action": ["s3:GetObject"],
-                    "Resource": [format!("arn:aws:s3:::{}/*", bucket)]
-                }]
-            });
-
-            client
-                .put_bucket_policy()
-                .bucket(bucket)
-                .policy(policy.to_string())
-                .send()
-                .await
-                .map_err(|_| crate::error::ApiError::InternalError)?;
-
-            info!("Created bucket: {}", bucket);
-            Ok(())
-        }
-    }
-}
 
 async fn recover_zombie_jobs(state: &Arc<AppState>) -> Result<()> {
     let recovered = sqlx::query!(
@@ -138,7 +79,7 @@ async fn recover_zombie_jobs(state: &Arc<AppState>) -> Result<()> {
     Ok(())
 }
 
-async fn process_next_job(state: &Arc<AppState>, s3_client: &S3Client) -> Result<()> {
+async fn process_next_job(state: &Arc<AppState>, storage: &StorageService) -> Result<()> {
     let job = sqlx::query!(
         r#"
         UPDATE jobs
@@ -150,7 +91,7 @@ async fn process_next_job(state: &Arc<AppState>, s3_client: &S3Client) -> Result
             LIMIT 1
             FOR UPDATE SKIP LOCKED
         )
-        RETURNING id, content_id, api_key, text_content, voice, cost
+        RETURNING id, content_id, api_key, text_content, voice, cost, storage_type
         "#
     )
     .fetch_optional(&state.db)
@@ -182,15 +123,18 @@ async fn process_next_job(state: &Arc<AppState>, s3_client: &S3Client) -> Result
 
     let voice = job.voice.as_str();
 
+    // Determine storage backend (job preference or default)
+    let storage_type = job.storage_type.as_deref().unwrap_or(&state.config.default_storage);
+    let backend = StorageBackend::from(storage_type);
+
     // Call Kokoro TTS
     match generate_tts_kokoro(state, &text, voice).await {
         Ok(result) => {
-            // Upload to MinIO (MP3 format from DeepInfra)
             let filename = format!("{}.mp3", job.id);
-            match upload_audio(s3_client, &filename, &result.audio_data, "audio/mpeg").await {
-                Ok(_) => {
-                    let audio_url = format!("{}/{}", state.config.audio_public_url, filename);
+            match storage.upload(&filename, &result.audio_data, "audio/mpeg", backend).await {
+                Ok(upload_result) => {
                     let runtime_ms = result.runtime_ms.map(|ms| ms as i32);
+                    let pinning_cost = upload_result.pinning_cost;
 
                     sqlx::query!(
                         r#"
@@ -201,27 +145,42 @@ async fn process_next_job(state: &Arc<AppState>, s3_client: &S3Client) -> Result
                             actual_runtime_ms = $3,
                             deepinfra_cost = $4,
                             deepinfra_request_id = $5,
+                            storage_type = $6,
+                            ipfs_cid = $7,
+                            crust_order_id = $8,
+                            pinning_cost = $9,
                             completed_at = NOW()
-                        WHERE id = $6
+                        WHERE id = $10
                         "#,
-                        audio_url,
+                        upload_result.url,
                         result.duration_seconds,
                         runtime_ms,
                         result.cost,
                         result.request_id,
+                        upload_result.storage_type,
+                        upload_result.ipfs_cid,
+                        upload_result.crust_order_id,
+                        pinning_cost,
                         job.id
                     )
                     .execute(&state.db)
                     .await
                     .map_err(|_| crate::error::ApiError::InternalError)?;
 
+                    let storage_info = if let Some(cid) = &upload_result.ipfs_cid {
+                        format!("ipfs:{}", cid)
+                    } else {
+                        "minio".to_string()
+                    };
+
                     info!(
-                        "Job {} completed: {:.1}s audio, {} bytes, runtime {}ms, cost ${:.6}",
+                        "Job {} completed: {:.1}s audio, {} bytes, runtime {}ms, cost ${:.6}, storage: {}",
                         job.id,
                         result.duration_seconds,
                         result.audio_data.len(),
                         result.runtime_ms.unwrap_or(0),
-                        result.cost.unwrap_or(0.0)
+                        result.cost.unwrap_or(0.0),
+                        storage_info
                     );
                 }
                 Err(e) => {
@@ -317,23 +276,6 @@ async fn generate_tts_kokoro(state: &AppState, text: &str, voice: &str) -> Resul
         cost,
         request_id: kokoro_response.request_id,
     })
-}
-
-async fn upload_audio(client: &S3Client, filename: &str, data: &[u8], content_type: &str) -> Result<()> {
-    client
-        .put_object()
-        .bucket("sonotxt-audio")
-        .key(filename)
-        .body(ByteStream::from(data.to_vec()))
-        .content_type(content_type)
-        .send()
-        .await
-        .map_err(|e| {
-            error!("S3 upload failed: {:?}", e);
-            crate::error::ApiError::InternalError
-        })?;
-
-    Ok(())
 }
 
 async fn mark_job_failed(state: &Arc<AppState>, job_id: &str, reason: &str) -> Result<()> {

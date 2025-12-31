@@ -107,6 +107,36 @@ pub struct Config {
     // deposit wallet seed (for generating per-user addresses)
     #[arg(long, env = "DEPOSIT_WALLET_SEED")]
     pub deposit_wallet_seed: Option<String>,
+
+    // ipfs storage
+    #[arg(long, env = "IPFS_API_URL", default_value = "http://127.0.0.1:5001")]
+    pub ipfs_api_url: String,
+
+    #[arg(long, env = "IPFS_GATEWAY_URL", default_value = "https://ipfs.io/ipfs")]
+    pub ipfs_gateway_url: String,
+
+    // crust pinning
+    #[arg(long, env = "CRUST_API_URL", default_value = "https://pin.crustcode.com/psa")]
+    pub crust_api_url: String,
+
+    #[arg(long, env = "CRUST_AUTH_TOKEN")]
+    pub crust_auth_token: Option<String>,
+
+    // cost per MB for crust pinning (in USD)
+    #[arg(long, env = "CRUST_COST_PER_MB", default_value = "0.001")]
+    pub crust_cost_per_mb: f64,
+
+    // default storage backend: "minio" or "ipfs"
+    #[arg(long, env = "DEFAULT_STORAGE", default_value = "minio")]
+    pub default_storage: String,
+
+    // embed secret for HMAC domain verification
+    #[arg(long, env = "EMBED_SECRET")]
+    pub embed_secret: Option<String>,
+
+    // embed daily char limit per domain
+    #[arg(long, env = "EMBED_DAILY_LIMIT", default_value = "50000")]
+    pub embed_daily_limit: i32,
 }
 
 impl Config {

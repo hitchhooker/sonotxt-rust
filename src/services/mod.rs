@@ -6,6 +6,7 @@ pub mod crypto;
 pub mod magic_link;
 pub mod payments;
 pub mod seed_manager;
+pub mod storage;
 pub mod tpm;
 pub mod user_auth;
 pub mod wallet;

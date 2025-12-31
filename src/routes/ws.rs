@@ -95,7 +95,9 @@ async fn get_job_status(state: &AppState, job_id: &str) -> JobStatus {
             actual_runtime_ms,
             deepinfra_cost,
             started_at,
-            created_at
+            created_at,
+            storage_type,
+            ipfs_cid
         FROM jobs WHERE id = $1"#,
         job_id
     )
@@ -119,6 +121,8 @@ async fn get_job_status(state: &AppState, job_id: &str) -> JobStatus {
             duration_seconds: job.duration_seconds.unwrap_or(0.0),
             runtime_ms: job.actual_runtime_ms,
             cost: job.deepinfra_cost,
+            storage_type: job.storage_type,
+            ipfs_cid: job.ipfs_cid,
         },
         "failed" => JobStatus::Failed {
             reason: job.error_message.unwrap_or_else(|| "Processing failed".into()),

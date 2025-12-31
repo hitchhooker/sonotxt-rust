@@ -1,15 +1,18 @@
--- user accounts with dual auth: email magic link OR passphrase-derived key
+-- user accounts with dual auth: email magic link OR nickname+pin derived key
 CREATE TABLE IF NOT EXISTS users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+
+    -- nickname for key-based auth (public, stored lowercase)
+    nickname TEXT UNIQUE,
 
     -- email auth (optional)
     email TEXT UNIQUE,
     email_verified BOOLEAN NOT NULL DEFAULT FALSE,
 
     -- key-based auth (optional)
-    -- public_key is the ed25519 pubkey derived from user's secret identifier
+    -- public_key is the ed25519 pubkey derived client-side from nickname:pin
     public_key TEXT UNIQUE,
-    -- hash of identifier to ensure uniqueness without storing it
+    -- hash of nickname to ensure uniqueness
     identifier_hash TEXT UNIQUE,
 
     -- account info

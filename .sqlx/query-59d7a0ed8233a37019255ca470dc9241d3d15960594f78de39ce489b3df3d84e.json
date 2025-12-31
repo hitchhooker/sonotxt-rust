@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                        UPDATE jobs\n                        SET status = 'completed',\n                            audio_url = $1,\n                            duration_seconds = $2,\n                            actual_runtime_ms = $3,\n                            deepinfra_cost = $4,\n                            deepinfra_request_id = $5,\n                            storage_type = $6,\n                            ipfs_cid = $7,\n                            crust_order_id = $8,\n                            pinning_cost = $9,\n                            completed_at = NOW()\n                        WHERE id = $10\n                        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Float8",
+        "Int4",
+        "Float8",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Float8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "59d7a0ed8233a37019255ca470dc9241d3d15960594f78de39ce489b3df3d84e"
+}

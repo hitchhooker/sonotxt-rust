@@ -9,17 +9,18 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::{
-    error::Result,
-    services::{user_auth, magic_link},
+    error::{ApiError, Result},
+    services::{magic_link, user_auth},
     AppState,
 };
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
-        // nickname + pin auth
+        // nickname + client-derived key auth
         .route("/check-nickname", post(check_nickname))
         .route("/register", post(register))
-        .route("/login", post(login))
+        .route("/challenge", post(get_challenge))
+        .route("/verify", post(verify))
         // magic link auth
         .route("/magic-link/request", post(request_magic_link))
         .route("/magic-link/verify", post(verify_magic_link))
@@ -29,7 +30,7 @@ pub fn routes() -> Router<Arc<AppState>> {
 }
 
 // ============================================================================
-// Nickname + Pin auth endpoints
+// Nickname + client-derived key auth endpoints
 // ============================================================================
 
 #[derive(Debug, Deserialize)]
@@ -59,7 +60,7 @@ pub async fn check_nickname(
 #[derive(Debug, Deserialize)]
 pub struct RegisterRequest {
     nickname: String,
-    pin: String,
+    public_key: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -68,71 +69,105 @@ pub struct AuthResponse {
     nickname: Option<String>,
     email: Option<String>,
     balance: f64,
-    token: String,
+    token: Option<String>,
 }
 
-/// Register with nickname + pin
+/// Register with nickname + public_key (derived client-side)
 pub async fn register(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RegisterRequest>,
 ) -> Result<Json<AuthResponse>> {
-    // register user
-    let user = user_auth::register_with_pin(&state.db, &req.nickname, &req.pin).await?;
+    // rate limit by public key to prevent spam registrations
+    let mut redis = state.redis.clone();
+    user_auth::check_rate_limit(&mut redis, "register", &req.public_key).await?;
 
-    // auto-login: get challenge and sign it client-side would be better,
-    // but for simplicity we do it server-side here
-    let challenge = user_auth::start_pin_login(&state.db, &req.nickname, &req.pin).await?;
-    let signature = user_auth::sign_challenge(&req.nickname, &req.pin, &challenge);
-    let (user, token) = user_auth::complete_pin_login(
-        &state.db,
-        &req.nickname,
-        &req.pin,
-        &challenge,
-        &signature,
-    ).await?;
+    let result = user_auth::register_with_pubkey(&state.db, &req.nickname, &req.public_key).await;
 
-    Ok(Json(AuthResponse {
-        user_id: user.id.to_string(),
-        nickname: Some(req.nickname),
-        email: user.email,
-        balance: user.balance,
-        token,
+    match result {
+        Ok(user) => {
+            user_auth::clear_rate_limit(&mut redis, "register", &req.public_key).await;
+
+            Ok(Json(AuthResponse {
+                user_id: user.id.to_string(),
+                nickname: user.nickname,
+                email: user.email,
+                balance: user.balance,
+                token: None, // User needs to login after registration
+            }))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ChallengeRequest {
+    nickname: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ChallengeResponse {
+    challenge: String,
+    public_key: String,
+}
+
+/// Get a challenge to sign for login
+pub async fn get_challenge(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ChallengeRequest>,
+) -> Result<Json<ChallengeResponse>> {
+    // rate limit challenge requests to prevent probe attacks
+    let nick_hash = user_auth::hash_nickname(&req.nickname);
+    let mut redis = state.redis.clone();
+    user_auth::check_rate_limit(&mut redis, "challenge", &nick_hash).await?;
+
+    let (challenge, public_key) = user_auth::get_login_challenge(&state.db, &req.nickname).await?;
+
+    Ok(Json(ChallengeResponse {
+        challenge,
+        public_key,
     }))
 }
 
 #[derive(Debug, Deserialize)]
-pub struct LoginRequest {
+pub struct VerifyRequest {
     nickname: String,
-    pin: String,
+    challenge: String,
+    signature: String,
 }
 
-/// Login with nickname + pin
-pub async fn login(
+/// Verify signature and create session
+pub async fn verify(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<LoginRequest>,
+    Json(req): Json<VerifyRequest>,
 ) -> Result<Json<AuthResponse>> {
-    // get challenge
-    let challenge = user_auth::start_pin_login(&state.db, &req.nickname, &req.pin).await?;
+    // rate limit by nickname hash to prevent brute force
+    let nick_hash = user_auth::hash_nickname(&req.nickname);
+    let mut redis = state.redis.clone();
 
-    // sign it (in real client-side flow, client would sign)
-    let signature = user_auth::sign_challenge(&req.nickname, &req.pin, &challenge);
+    user_auth::check_rate_limit(&mut redis, "login", &nick_hash).await?;
 
-    // complete login
-    let (user, token) = user_auth::complete_pin_login(
+    let result = user_auth::verify_and_login(
         &state.db,
         &req.nickname,
-        &req.pin,
-        &challenge,
-        &signature,
-    ).await?;
+        &req.challenge,
+        &req.signature
+    ).await;
 
-    Ok(Json(AuthResponse {
-        user_id: user.id.to_string(),
-        nickname: Some(req.nickname),
-        email: user.email,
-        balance: user.balance,
-        token,
-    }))
+    match result {
+        Ok((user, token)) => {
+            // clear rate limit on success
+            user_auth::clear_rate_limit(&mut redis, "login", &nick_hash).await;
+
+            Ok(Json(AuthResponse {
+                user_id: user.id.to_string(),
+                nickname: user.nickname,
+                email: user.email,
+                balance: user.balance,
+                token: Some(token),
+            }))
+        }
+        Err(e) => Err(e),
+    }
 }
 
 // ============================================================================
@@ -182,7 +217,7 @@ pub async fn verify_magic_link(
         nickname: None,
         email: user.email,
         balance: user.balance,
-        token,
+        token: Some(token),
     }))
 }
 
@@ -198,6 +233,7 @@ pub struct SessionRequest {
 #[derive(Debug, Serialize)]
 pub struct UserResponse {
     user_id: String,
+    nickname: Option<String>,
     email: Option<String>,
     balance: f64,
 }
@@ -211,6 +247,7 @@ pub async fn get_session(
 
     Ok(Json(UserResponse {
         user_id: user.id.to_string(),
+        nickname: user.nickname,
         email: user.email,
         balance: user.balance,
     }))

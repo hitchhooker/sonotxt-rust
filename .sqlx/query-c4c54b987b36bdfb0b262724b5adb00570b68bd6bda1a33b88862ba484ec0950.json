@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        UPDATE jobs\n        SET status = 'processing', started_at = NOW()\n        WHERE id = (\n            SELECT id FROM jobs\n            WHERE status = 'queued'\n            ORDER BY created_at\n            LIMIT 1\n            FOR UPDATE SKIP LOCKED\n        )\n        RETURNING id, content_id, api_key, text_content, voice, cost\n        ",
+  "query": "\n        UPDATE jobs\n        SET status = 'processing', started_at = NOW()\n        WHERE id = (\n            SELECT id FROM jobs\n            WHERE status = 'queued'\n            ORDER BY created_at\n            LIMIT 1\n            FOR UPDATE SKIP LOCKED\n        )\n        RETURNING id, content_id, api_key, text_content, voice, cost, storage_type\n        ",
   "describe": {
     "columns": [
       {
@@ -32,6 +32,11 @@
         "ordinal": 5,
         "name": "cost",
         "type_info": "Float8"
+      },
+      {
+        "ordinal": 6,
+        "name": "storage_type",
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -43,8 +48,9 @@
       true,
       true,
       false,
+      true,
       true
     ]
   },
-  "hash": "64060838b9ab055913a43f26453bfdc50392ab6e78928f6d5d55bf032ecde01e"
+  "hash": "c4c54b987b36bdfb0b262724b5adb00570b68bd6bda1a33b88862ba484ec0950"
 }

@@ -1,47 +1,76 @@
-use argon2::Argon2;
-use ed25519_dalek::{Signer, SigningKey, VerifyingKey, Signature, Verifier};
-use sha2::{Sha256, Digest};
+//! User authentication with client-side ed25519 key derivation
+//!
+//! Flow:
+//! 1. Client derives ed25519 keypair from nickname:pin using argon2id
+//! 2. Registration: client sends nickname + public_key (pin never leaves client)
+//! 3. Login: server sends challenge, client signs, server verifies
+
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+use redis::AsyncCommands;
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::error::{ApiError, Result};
 
-const KEY_DERIVATION_SALT: &[u8] = b"sonotxt-ed25519-v1";
+/// Rate limit config
+const MAX_AUTH_ATTEMPTS: u32 = 5;      // Max attempts per window
+const RATE_LIMIT_WINDOW: u64 = 300;    // 5 minute window
+const LOCKOUT_DURATION: u64 = 900;     // 15 minute lockout after exceeding
 
-/// Combine nickname + pin into the secret used for key derivation
-fn combine_credentials(nickname: &str, pin: &str) -> String {
-    format!("{}:{}", nickname.to_lowercase().trim(), pin.trim())
+/// Check and increment rate limit, returns error if exceeded
+pub async fn check_rate_limit(
+    redis: &mut redis::aio::ConnectionManager,
+    key_prefix: &str,
+    identifier: &str,
+) -> Result<()> {
+    let key = format!("auth_limit:{}:{}", key_prefix, identifier);
+    let lockout_key = format!("auth_lockout:{}:{}", key_prefix, identifier);
+
+    // Check if locked out
+    let locked: Option<String> = redis.get(&lockout_key).await.unwrap_or(None);
+    if locked.is_some() {
+        return Err(ApiError::RateLimited);
+    }
+
+    // Increment attempt counter
+    let attempts: u32 = redis.incr(&key, 1).await.unwrap_or(1);
+
+    // Set expiry on first attempt
+    if attempts == 1 {
+        let _: () = redis.expire(&key, RATE_LIMIT_WINDOW as i64).await.unwrap_or(());
+    }
+
+    // Check if exceeded
+    if attempts > MAX_AUTH_ATTEMPTS {
+        // Set lockout
+        let _: () = redis.set_ex(&lockout_key, "1", LOCKOUT_DURATION).await.unwrap_or(());
+        return Err(ApiError::RateLimited);
+    }
+
+    Ok(())
 }
 
-/// Derive ed25519 keypair from nickname + pin
-/// Uses Argon2id for key stretching, then uses output as ed25519 seed
-pub fn derive_keypair(nickname: &str, pin: &str) -> (SigningKey, VerifyingKey) {
-    let secret = combine_credentials(nickname, pin);
-    let mut seed = [0u8; 32];
-
-    // use argon2id with fixed params for deterministic derivation
-    let argon2 = Argon2::default();
-    argon2
-        .hash_password_into(
-            secret.as_bytes(),
-            KEY_DERIVATION_SALT,
-            &mut seed,
-        )
-        .expect("argon2 hash failed");
-
-    let signing_key = SigningKey::from_bytes(&seed);
-    let verifying_key = signing_key.verifying_key();
-
-    (signing_key, verifying_key)
+/// Clear rate limit on successful auth
+pub async fn clear_rate_limit(
+    redis: &mut redis::aio::ConnectionManager,
+    key_prefix: &str,
+    identifier: &str,
+) {
+    let key = format!("auth_limit:{}:{}", key_prefix, identifier);
+    let _: () = redis.del(&key).await.unwrap_or(());
 }
 
-/// Get the public key (hex encoded) from nickname + pin
-pub fn credentials_to_pubkey(nickname: &str, pin: &str) -> String {
-    let (_, verifying_key) = derive_keypair(nickname, pin);
-    hex::encode(verifying_key.as_bytes())
+#[derive(Debug, Clone)]
+pub struct User {
+    pub id: Uuid,
+    pub nickname: Option<String>,
+    pub email: Option<String>,
+    pub public_key: Option<String>,
+    pub balance: f64,
 }
 
-/// Hash just the nickname for uniqueness check (we store this to reserve the name)
+/// Hash nickname for storage (we store hash, not plaintext, for some privacy)
 pub fn hash_nickname(nickname: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"sonotxt-nick-v1");
@@ -58,40 +87,39 @@ pub fn validate_nickname(nickname: &str) -> std::result::Result<(), &'static str
     if nick.len() > 20 {
         return Err("nickname must be at most 20 characters");
     }
-    if !nick.chars().all(|c| c.is_alphanumeric() || c == '_' || c == '-') {
+    if !nick
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+    {
         return Err("nickname can only contain letters, numbers, _ and -");
     }
     Ok(())
 }
 
-/// Validate pin format
-pub fn validate_pin(pin: &str) -> std::result::Result<(), &'static str> {
-    let p = pin.trim();
-    if p.len() < 4 {
-        return Err("pin must be at least 4 characters");
+/// Validate public key format (64 hex chars = 32 bytes)
+pub fn validate_public_key(pubkey: &str) -> std::result::Result<(), &'static str> {
+    if pubkey.len() != 64 {
+        return Err("invalid public key length");
     }
-    if p.len() > 32 {
-        return Err("pin must be at most 32 characters");
+    if !pubkey.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("invalid public key format");
     }
+    // Try to parse it
+    let bytes = hex::decode(pubkey).map_err(|_| "invalid hex")?;
+    let arr: [u8; 32] = bytes.try_into().map_err(|_| "invalid key length")?;
+    VerifyingKey::from_bytes(&arr).map_err(|_| "invalid ed25519 public key")?;
     Ok(())
 }
 
-/// Generate a random challenge for key-based auth
+/// Generate a random challenge for signature auth
 pub fn generate_challenge() -> String {
     let mut bytes = [0u8; 32];
     getrandom::getrandom(&mut bytes).expect("getrandom failed");
     hex::encode(bytes)
 }
 
-/// Sign a challenge with the derived key
-pub fn sign_challenge(nickname: &str, pin: &str, challenge: &str) -> String {
-    let (signing_key, _) = derive_keypair(nickname, pin);
-    let challenge_bytes = hex::decode(challenge).expect("invalid challenge hex");
-    let signature = signing_key.sign(&challenge_bytes);
-    hex::encode(signature.to_bytes())
-}
-
-/// Verify a signed challenge
+/// Verify a signature against a public key and challenge
+/// The challenge is signed as raw bytes (not hex)
 pub fn verify_signature(pubkey_hex: &str, challenge: &str, signature_hex: &str) -> bool {
     let Ok(pubkey_bytes) = hex::decode(pubkey_hex) else {
         return false;
@@ -103,9 +131,8 @@ pub fn verify_signature(pubkey_hex: &str, challenge: &str, signature_hex: &str) 
         return false;
     };
 
-    let Ok(challenge_bytes) = hex::decode(challenge) else {
-        return false;
-    };
+    // Challenge is signed as the raw string bytes (UTF-8), not hex-decoded
+    let challenge_bytes = challenge.as_bytes();
 
     let Ok(sig_bytes) = hex::decode(signature_hex) else {
         return false;
@@ -115,7 +142,7 @@ pub fn verify_signature(pubkey_hex: &str, challenge: &str, signature_hex: &str) 
     };
     let signature = Signature::from_bytes(&sig_array);
 
-    verifying_key.verify(&challenge_bytes, &signature).is_ok()
+    verifying_key.verify(challenge_bytes, &signature).is_ok()
 }
 
 /// Generate a session token
@@ -132,117 +159,171 @@ pub fn hash_token(token: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
-#[derive(Debug, Clone)]
-pub struct User {
-    pub id: Uuid,
-    pub email: Option<String>,
-    pub public_key: Option<String>,
-    pub balance: f64,
+/// Check if a nickname is available
+/// NOTE: This now always returns true to prevent username enumeration.
+/// The actual check happens at registration time.
+pub async fn is_nickname_available(_db: &PgPool, _nickname: &str) -> Result<bool> {
+    // Always return true to prevent username enumeration
+    // Real availability check happens at registration
+    Ok(true)
 }
 
-/// Check if a nickname is available
-pub async fn is_nickname_available(db: &PgPool, nickname: &str) -> Result<bool> {
+/// Internal check for registration (not exposed via API)
+pub async fn is_nickname_actually_available(db: &PgPool, nickname: &str) -> Result<bool> {
     let nick_hash = hash_nickname(nickname);
 
-    let exists: Option<(i64,)> = sqlx::query_as(
-        "SELECT 1 FROM users WHERE identifier_hash = $1"
-    )
-    .bind(&nick_hash)
-    .fetch_optional(db)
-    .await?;
+    let exists: Option<(i64,)> =
+        sqlx::query_as("SELECT 1 FROM users WHERE identifier_hash = $1")
+            .bind(&nick_hash)
+            .fetch_optional(db)
+            .await?;
 
     Ok(exists.is_none())
 }
 
-/// Register with nickname + pin
-pub async fn register_with_pin(db: &PgPool, nickname: &str, pin: &str) -> Result<User> {
-    // validate inputs
+/// Register with nickname + public_key (client-derived)
+pub async fn register_with_pubkey(
+    db: &PgPool,
+    nickname: &str,
+    public_key: &str,
+) -> Result<User> {
+    // Validate inputs
     if let Err(e) = validate_nickname(nickname) {
         return Err(ApiError::InvalidRequest(e.to_string()));
     }
-    if let Err(e) = validate_pin(pin) {
+    if let Err(e) = validate_public_key(public_key) {
         return Err(ApiError::InvalidRequest(e.to_string()));
     }
 
-    let pubkey = credentials_to_pubkey(nickname, pin);
     let nick_hash = hash_nickname(nickname);
+    let nick_lower = nickname.to_lowercase().trim().to_string();
 
-    // check nickname availability
-    if !is_nickname_available(db, nickname).await? {
-        return Err(ApiError::InvalidRequest("nickname taken".to_string()));
+    // Check nickname availability (use internal check, not the dummy one)
+    if !is_nickname_actually_available(db, nickname).await? {
+        // Return generic error to not confirm username exists
+        return Err(ApiError::InvalidRequest("registration failed".to_string()));
     }
 
-    let user: (Uuid, Option<String>, Option<String>, f64) = sqlx::query_as(
+    // Check public key not already registered
+    let pk_exists: Option<(i64,)> =
+        sqlx::query_as("SELECT 1 FROM users WHERE public_key = $1")
+            .bind(public_key)
+            .fetch_optional(db)
+            .await?;
+    if pk_exists.is_some() {
+        return Err(ApiError::InvalidRequest(
+            "public key already registered".to_string(),
+        ));
+    }
+
+    let user: (Uuid, Option<String>, Option<String>, Option<String>, f64) = sqlx::query_as(
         r#"
-        INSERT INTO users (public_key, identifier_hash)
-        VALUES ($1, $2)
-        RETURNING id, email, public_key, balance::float8
-        "#
+        INSERT INTO users (nickname, public_key, identifier_hash)
+        VALUES ($1, $2, $3)
+        RETURNING id, nickname, email, public_key, balance::float8
+        "#,
     )
-    .bind(&pubkey)
+    .bind(&nick_lower)
+    .bind(public_key)
     .bind(&nick_hash)
     .fetch_one(db)
     .await?;
 
     Ok(User {
         id: user.0,
-        email: user.1,
-        public_key: user.2,
-        balance: user.3,
+        nickname: user.1,
+        email: user.2,
+        public_key: user.3,
+        balance: user.4,
     })
 }
 
-/// Login with nickname + pin - returns a challenge to sign
-pub async fn start_pin_login(db: &PgPool, nickname: &str, pin: &str) -> Result<String> {
-    let pubkey = credentials_to_pubkey(nickname, pin);
+/// Get challenge for nickname-based login
+/// Returns (challenge, public_key) so client can verify they're signing for the right key
+/// NOTE: Returns fake challenge for non-existent users to prevent enumeration
+pub async fn get_login_challenge(db: &PgPool, nickname: &str) -> Result<(String, String)> {
+    let nick_hash = hash_nickname(nickname);
 
-    // verify user exists
-    let exists: Option<(i64,)> = sqlx::query_as(
-        "SELECT 1 FROM users WHERE public_key = $1"
+    // Get user by nickname hash
+    let user: Option<(Uuid, String)> = sqlx::query_as(
+        "SELECT id, public_key FROM users WHERE identifier_hash = $1 AND public_key IS NOT NULL",
     )
-    .bind(&pubkey)
+    .bind(&nick_hash)
     .fetch_optional(db)
     .await?;
 
-    if exists.is_none() {
-        return Err(ApiError::InvalidCredentials);
-    }
-
-    // create challenge
+    // Generate challenge regardless of whether user exists
     let challenge = generate_challenge();
-    let expires = chrono::Utc::now() + chrono::Duration::minutes(5);
 
-    sqlx::query(
-        r#"
-        INSERT INTO auth_challenges (public_key, challenge, expires_at)
-        VALUES ($1, $2, $3)
-        "#
-    )
-    .bind(&pubkey)
-    .bind(&challenge)
-    .bind(expires)
-    .execute(db)
-    .await?;
+    match user {
+        Some((_user_id, pubkey)) => {
+            // Real user - store challenge
+            let expires = chrono::Utc::now() + chrono::Duration::minutes(5);
 
-    Ok(challenge)
+            sqlx::query(
+                r#"
+                INSERT INTO auth_challenges (public_key, challenge, expires_at)
+                VALUES ($1, $2, $3)
+                "#,
+            )
+            .bind(&pubkey)
+            .bind(&challenge)
+            .bind(expires)
+            .execute(db)
+            .await?;
+
+            Ok((challenge, pubkey))
+        }
+        None => {
+            // Fake user - return deterministic fake pubkey based on nickname hash
+            // This prevents timing attacks and username enumeration
+            let fake_pubkey = generate_fake_pubkey(&nick_hash);
+            Ok((challenge, fake_pubkey))
+        }
+    }
 }
 
-/// Complete pin-based login with signed challenge
-pub async fn complete_pin_login(
+/// Generate a deterministic but fake-looking public key from a hash
+/// This is used for non-existent users to prevent enumeration
+fn generate_fake_pubkey(nick_hash: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"sonotxt-fake-pubkey-v1");
+    hasher.update(nick_hash.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// Verify signature and create session
+pub async fn verify_and_login(
     db: &PgPool,
     nickname: &str,
-    pin: &str,
     challenge: &str,
     signature: &str,
 ) -> Result<(User, String)> {
-    let pubkey = credentials_to_pubkey(nickname, pin);
+    let nick_hash = hash_nickname(nickname);
 
-    // verify challenge exists and not expired
+    // Get user and their public key
+    let user_row: Option<(Uuid, Option<String>, Option<String>, String, f64)> = sqlx::query_as(
+        r#"
+        SELECT id, nickname, email, public_key, balance::float8
+        FROM users
+        WHERE identifier_hash = $1 AND public_key IS NOT NULL
+        "#,
+    )
+    .bind(&nick_hash)
+    .fetch_optional(db)
+    .await?;
+
+    let Some((user_id, nickname, email, pubkey, balance)) = user_row else {
+        return Err(ApiError::InvalidCredentials);
+    };
+
+    // Verify challenge exists and not expired
     let challenge_row: Option<(Uuid,)> = sqlx::query_as(
         r#"
         SELECT id FROM auth_challenges
         WHERE public_key = $1 AND challenge = $2 AND expires_at > NOW()
-        "#
+        "#,
     )
     .bind(&pubkey)
     .bind(challenge)
@@ -253,26 +334,18 @@ pub async fn complete_pin_login(
         return Err(ApiError::InvalidCredentials);
     };
 
-    // verify signature
+    // Verify signature
     if !verify_signature(&pubkey, challenge, signature) {
         return Err(ApiError::InvalidCredentials);
     }
 
-    // delete used challenge
+    // Delete used challenge
     sqlx::query("DELETE FROM auth_challenges WHERE id = $1")
         .bind(challenge_id)
         .execute(db)
         .await?;
 
-    // get user
-    let user: (Uuid, Option<String>, Option<String>, f64) = sqlx::query_as(
-        "SELECT id, email, public_key, balance::float8 FROM users WHERE public_key = $1"
-    )
-    .bind(&pubkey)
-    .fetch_one(db)
-    .await?;
-
-    // create session
+    // Create session
     let token = generate_session_token();
     let token_hash = hash_token(&token);
     let expires = chrono::Utc::now() + chrono::Duration::days(30);
@@ -281,26 +354,27 @@ pub async fn complete_pin_login(
         r#"
         INSERT INTO sessions (user_id, token_hash, expires_at)
         VALUES ($1, $2, $3)
-        "#
+        "#,
     )
-    .bind(user.0)
+    .bind(user_id)
     .bind(&token_hash)
     .bind(expires)
     .execute(db)
     .await?;
 
-    // update last login
+    // Update last login
     sqlx::query("UPDATE users SET last_login = NOW() WHERE id = $1")
-        .bind(user.0)
+        .bind(user_id)
         .execute(db)
         .await?;
 
     Ok((
         User {
-            id: user.0,
-            email: user.1,
-            public_key: user.2,
-            balance: user.3,
+            id: user_id,
+            nickname,
+            email,
+            public_key: Some(pubkey),
+            balance,
         },
         token,
     ))
@@ -310,13 +384,13 @@ pub async fn complete_pin_login(
 pub async fn validate_session(db: &PgPool, token: &str) -> Result<User> {
     let token_hash = hash_token(token);
 
-    let row: Option<(Uuid, Option<String>, Option<String>, f64)> = sqlx::query_as(
+    let row: Option<(Uuid, Option<String>, Option<String>, Option<String>, f64)> = sqlx::query_as(
         r#"
-        SELECT u.id, u.email, u.public_key, u.balance::float8
+        SELECT u.id, u.nickname, u.email, u.public_key, u.balance::float8
         FROM sessions s
         JOIN users u ON s.user_id = u.id
         WHERE s.token_hash = $1 AND s.expires_at > NOW()
-        "#
+        "#,
     )
     .bind(&token_hash)
     .fetch_optional(db)
@@ -328,9 +402,10 @@ pub async fn validate_session(db: &PgPool, token: &str) -> Result<User> {
 
     Ok(User {
         id: user.0,
-        email: user.1,
-        public_key: user.2,
-        balance: user.3,
+        nickname: user.1,
+        email: user.2,
+        public_key: user.3,
+        balance: user.4,
     })
 }
 
@@ -349,42 +424,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_key_derivation_deterministic() {
-        let pubkey1 = credentials_to_pubkey("alice", "1234");
-        let pubkey2 = credentials_to_pubkey("alice", "1234");
-        assert_eq!(pubkey1, pubkey2);
-    }
-
-    #[test]
-    fn test_different_pins_different_keys() {
-        let pubkey1 = credentials_to_pubkey("alice", "1234");
-        let pubkey2 = credentials_to_pubkey("alice", "5678");
-        assert_ne!(pubkey1, pubkey2);
-    }
-
-    #[test]
-    fn test_different_nicknames_different_keys() {
-        let pubkey1 = credentials_to_pubkey("alice", "1234");
-        let pubkey2 = credentials_to_pubkey("bob", "1234");
-        assert_ne!(pubkey1, pubkey2);
-    }
-
-    #[test]
-    fn test_sign_verify() {
-        let challenge = generate_challenge();
-        let signature = sign_challenge("alice", "1234", &challenge);
-        let pubkey = credentials_to_pubkey("alice", "1234");
-
-        assert!(verify_signature(&pubkey, &challenge, &signature));
-    }
-
-    #[test]
-    fn test_wrong_pin_fails() {
-        let challenge = generate_challenge();
-        let signature = sign_challenge("alice", "1234", &challenge);
-        let pubkey = credentials_to_pubkey("alice", "wrong");
-
-        assert!(!verify_signature(&pubkey, &challenge, &signature));
+    fn test_nickname_hash_deterministic() {
+        let h1 = hash_nickname("alice");
+        let h2 = hash_nickname("Alice"); // case insensitive
+        assert_eq!(h1, h2);
     }
 
     #[test]
@@ -396,9 +439,16 @@ mod tests {
     }
 
     #[test]
-    fn test_pin_validation() {
-        assert!(validate_pin("1234").is_ok());
-        assert!(validate_pin("mypin123").is_ok());
-        assert!(validate_pin("123").is_err()); // too short
+    fn test_pubkey_validation() {
+        // Valid ed25519 public key (32 bytes = 64 hex chars)
+        // This is a test key, just random bytes that happen to be valid
+        let valid = "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a";
+        assert!(validate_public_key(valid).is_ok());
+
+        // Too short
+        assert!(validate_public_key("d75a980182b10ab7").is_err());
+
+        // Invalid hex
+        assert!(validate_public_key("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz").is_err());
     }
 }

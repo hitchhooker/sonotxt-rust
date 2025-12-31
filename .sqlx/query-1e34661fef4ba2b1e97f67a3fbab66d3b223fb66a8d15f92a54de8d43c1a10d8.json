@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "SELECT\n            status,\n            audio_url,\n            duration_seconds,\n            error_message,\n            estimated_duration_ms,\n            actual_runtime_ms,\n            deepinfra_cost,\n            started_at,\n            created_at\n        FROM jobs WHERE id = $1",
+  "query": "SELECT\n            status,\n            audio_url,\n            duration_seconds,\n            error_message,\n            estimated_duration_ms,\n            actual_runtime_ms,\n            deepinfra_cost,\n            started_at,\n            created_at,\n            storage_type,\n            ipfs_cid\n        FROM jobs WHERE id = $1",
   "describe": {
     "columns": [
       {
@@ -47,6 +47,16 @@
         "ordinal": 8,
         "name": "created_at",
         "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 9,
+        "name": "storage_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "ipfs_cid",
+        "type_info": "Text"
       }
     ],
     "parameters": {
@@ -63,8 +73,10 @@
       true,
       true,
       true,
-      false
+      false,
+      true,
+      true
     ]
   },
-  "hash": "eb3072971dfb5e8a98cfdca983722e0ecf656e217dbd458fc681b8f48c80a9cf"
+  "hash": "1e34661fef4ba2b1e97f67a3fbab66d3b223fb66a8d15f92a54de8d43c1a10d8"
 }

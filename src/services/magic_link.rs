@@ -91,12 +91,12 @@ pub async fn verify_magic_link(db: &PgPool, token: &str) -> Result<(User, String
         .await?;
 
     // find or create user
-    let user: (Uuid, Option<String>, Option<String>, f64) = sqlx::query_as(
+    let user: (Uuid, Option<String>, Option<String>, Option<String>, f64) = sqlx::query_as(
         r#"
         INSERT INTO users (email, email_verified)
         VALUES ($1, TRUE)
         ON CONFLICT (email) DO UPDATE SET email_verified = TRUE, last_login = NOW()
-        RETURNING id, email, public_key, balance::float8
+        RETURNING id, nickname, email, public_key, balance::float8
         "#
     )
     .bind(&email)
@@ -123,9 +123,10 @@ pub async fn verify_magic_link(db: &PgPool, token: &str) -> Result<(User, String
     Ok((
         User {
             id: user.0,
-            email: user.1,
-            public_key: user.2,
-            balance: user.3,
+            nickname: user.1,
+            email: user.2,
+            public_key: user.3,
+            balance: user.4,
         },
         session_token,
     ))

@@ -20,6 +20,8 @@ struct TtsRequest {
     text: String,
     #[serde(default = "default_voice")]
     voice: String,
+    #[serde(default)]
+    storage: Option<String>, // "minio" or "ipfs"
 }
 
 fn default_voice() -> String {
@@ -61,10 +63,24 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/voices", get(list_voices))
 }
 
-async fn list_voices() -> Json<serde_json::Value> {
+async fn list_voices(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let samples_url = format!("{}/samples", state.config.audio_public_url);
+
+    // Build voices with sample URLs
+    let voices_with_samples: Vec<serde_json::Value> = VALID_VOICES
+        .iter()
+        .map(|v| {
+            serde_json::json!({
+                "id": v,
+                "sample_url": format!("{}/{}.mp3", samples_url, v)
+            })
+        })
+        .collect();
+
     Json(serde_json::json!({
-        "voices": VALID_VOICES,
+        "voices": voices_with_samples,
         "default": "af_bella",
+        "samples_base_url": samples_url,
         "categories": {
             "american_female": ["af_alloy", "af_aoede", "af_bella", "af_heart", "af_jessica", "af_kore", "af_nicole", "af_nova", "af_river", "af_sarah", "af_sky"],
             "american_male": ["am_adam", "am_echo", "am_eric", "am_fenrir", "am_liam", "am_michael", "am_onyx", "am_puck", "am_santa"],
@@ -226,16 +242,18 @@ async fn tts(
             }
 
             let estimated_duration_ms = (char_count as f64 * crate::models::MS_PER_CHAR) as i32;
+            let storage_type = req.storage.as_deref();
 
             sqlx::query!(
-                "INSERT INTO jobs (id, api_key, text_content, voice, status, cost, is_free_tier, char_count, estimated_duration_ms) VALUES ($1, $2, $3, $4, 'queued', $5, FALSE, $6, $7)",
+                "INSERT INTO jobs (id, api_key, text_content, voice, status, cost, is_free_tier, char_count, estimated_duration_ms, storage_type) VALUES ($1, $2, $3, $4, 'queued', $5, FALSE, $6, $7, $8)",
                 job_id,
                 auth_user.api_key,
                 text,
                 voice,
                 estimated_cost,
                 char_count,
-                estimated_duration_ms
+                estimated_duration_ms,
+                storage_type
             )
             .execute(&mut *tx)
             .await?;
@@ -267,16 +285,19 @@ async fn tts(
             .await?;
 
             let estimated_duration_ms = (char_count as f64 * crate::models::MS_PER_CHAR) as i32;
+            // free tier only gets minio, not ipfs (to avoid pinning costs)
+            let storage_type: Option<&str> = Some("minio");
 
             // create job with ip_hash instead of api_key
             sqlx::query!(
-                "INSERT INTO jobs (id, ip_hash, text_content, voice, status, cost, is_free_tier, char_count, estimated_duration_ms) VALUES ($1, $2, $3, $4, 'queued', 0, TRUE, $5, $6)",
+                "INSERT INTO jobs (id, ip_hash, text_content, voice, status, cost, is_free_tier, char_count, estimated_duration_ms, storage_type) VALUES ($1, $2, $3, $4, 'queued', 0, TRUE, $5, $6, $7)",
                 job_id,
                 ip_hash,
                 text,
                 voice,
                 char_count,
-                estimated_duration_ms
+                estimated_duration_ms,
+                storage_type
             )
             .execute(&mut *tx)
             .await?;
@@ -312,7 +333,9 @@ async fn status(
             actual_runtime_ms,
             deepinfra_cost,
             started_at,
-            created_at
+            created_at,
+            storage_type,
+            ipfs_cid
         FROM jobs WHERE id = $1"#,
         job_id
     )
@@ -328,6 +351,8 @@ async fn status(
             duration_seconds: job.duration_seconds.unwrap_or(0.0),
             runtime_ms: job.actual_runtime_ms,
             cost: job.deepinfra_cost,
+            storage_type: job.storage_type,
+            ipfs_cid: job.ipfs_cid,
         })),
         "failed" => Ok(Json(JobStatus::Failed {
             reason: job.error_message.unwrap_or_else(|| "Processing failed".into()),

@@ -13,7 +13,7 @@ use std::sync::Arc;
 use subtle::ConstantTimeEq;
 use uuid::Uuid;
 
-use crate::{auth::api_key::ApiKey, error::Result, AppState};
+use crate::{auth::api_key::ApiKey, error::Result, routes::embed::generate_embed_signature, AppState};
 
 #[derive(Debug, Serialize)]
 struct CreateApiKeyResponse {
@@ -36,7 +36,9 @@ fn default_balance() -> f64 {
 }
 
 pub fn routes() -> Router<Arc<AppState>> {
-    Router::new().route("/admin/apikey", post(create_api_key))
+    Router::new()
+        .route("/admin/apikey", post(create_api_key))
+        .route("/admin/embed-sig", post(create_embed_sig))
 }
 
 async fn create_api_key(
@@ -125,5 +127,53 @@ async fn create_api_key(
         account_id,
         balance: req.balance,
         created_at: now,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct EmbedSigRequest {
+    domain: String,
+}
+
+#[derive(Debug, Serialize)]
+struct EmbedSigResponse {
+    domain: String,
+    sig: String,
+    embed_code: String,
+}
+
+async fn create_embed_sig(
+    State(state): State<Arc<AppState>>,
+    TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
+    Json(req): Json<EmbedSigRequest>,
+) -> Result<Json<EmbedSigResponse>> {
+    // verify admin token
+    let is_valid = match &state.config.admin_token {
+        Some(token) => {
+            let a = token.as_bytes();
+            let b = auth.token().as_bytes();
+            a.len() == b.len() && a.ct_eq(b).into()
+        }
+        None => false,
+    };
+
+    if !is_valid {
+        return Err(crate::error::ApiError::Unauthorized);
+    }
+
+    let secret = state.config.embed_secret.as_ref()
+        .ok_or_else(|| crate::error::ApiError::Internal("embed_secret not configured".into()))?;
+
+    let sig = generate_embed_signature(secret, &req.domain);
+
+    let embed_code = format!(
+        r#"<script src="https://api.sonotxt.com/embed.js" data-sig="{}"></script>"#,
+        sig
+    );
+
+    Ok(Json(EmbedSigResponse {
+        domain: req.domain,
+        sig,
+        embed_code,
     }))
 }
