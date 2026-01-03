@@ -186,6 +186,8 @@ pub async fn register_with_pubkey(
     db: &PgPool,
     nickname: &str,
     public_key: &str,
+    email: Option<&str>,
+    recovery_share: Option<&str>,
 ) -> Result<User> {
     // Validate inputs
     if let Err(e) = validate_nickname(nickname) {
@@ -193,6 +195,21 @@ pub async fn register_with_pubkey(
     }
     if let Err(e) = validate_public_key(public_key) {
         return Err(ApiError::InvalidRequest(e.to_string()));
+    }
+
+    // Validate email if provided
+    let email_lower = email.map(|e| e.to_lowercase().trim().to_string());
+    if let Some(ref e) = email_lower {
+        if !e.contains('@') || e.len() < 5 {
+            return Err(ApiError::InvalidRequest("invalid email".to_string()));
+        }
+    }
+
+    // Must provide recovery_share if email is provided
+    if email.is_some() && recovery_share.is_none() {
+        return Err(ApiError::InvalidRequest(
+            "recovery_share required with email".to_string(),
+        ));
     }
 
     let nick_hash = hash_nickname(nickname);
@@ -216,16 +233,30 @@ pub async fn register_with_pubkey(
         ));
     }
 
+    // Check email not already in use
+    if let Some(ref e) = email_lower {
+        let email_exists: Option<(i64,)> =
+            sqlx::query_as("SELECT 1 FROM users WHERE email = $1")
+                .bind(e)
+                .fetch_optional(db)
+                .await?;
+        if email_exists.is_some() {
+            return Err(ApiError::InvalidRequest("email already registered".to_string()));
+        }
+    }
+
     let user: (Uuid, Option<String>, Option<String>, Option<String>, f64) = sqlx::query_as(
         r#"
-        INSERT INTO users (nickname, public_key, identifier_hash)
-        VALUES ($1, $2, $3)
+        INSERT INTO users (nickname, public_key, identifier_hash, email, recovery_share)
+        VALUES ($1, $2, $3, $4, $5)
         RETURNING id, nickname, email, public_key, balance::float8
         "#,
     )
     .bind(&nick_lower)
     .bind(public_key)
     .bind(&nick_hash)
+    .bind(&email_lower)
+    .bind(recovery_share)
     .fetch_one(db)
     .await?;
 

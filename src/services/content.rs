@@ -2,11 +2,16 @@
 use crate::{error::{ApiError, Result}, AppState};
 use scraper::Html;
 
+pub struct ExtractedContent {
+    pub text: String,
+    pub title: Option<String>,
+}
+
 pub async fn extract_content(
     state: &AppState,
     url: &str,
     selector: Option<&str>,
-) -> Result<String> {
+) -> Result<ExtractedContent> {
     let parsed = url::Url::parse(url)
         .map_err(|_| ApiError::InvalidUrl)?;
     
@@ -31,7 +36,14 @@ pub async fn extract_content(
     }
 
     let document = Html::parse_document(&html);
-    
+
+    // Extract title
+    let title = scraper::Selector::parse("title")
+        .ok()
+        .and_then(|sel| document.select(&sel).next())
+        .map(|el| el.text().collect::<String>().trim().to_string())
+        .filter(|t| !t.is_empty());
+
     let text = if let Some(sel) = selector {
         let selector = scraper::Selector::parse(sel)
             .map_err(|_| ApiError::InvalidUrl)?;
@@ -66,5 +78,5 @@ pub async fn extract_content(
         return Err(ApiError::InvalidUrl);
     }
 
-    Ok(cleaned)
+    Ok(ExtractedContent { text: cleaned, title })
 }

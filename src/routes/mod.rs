@@ -1,5 +1,6 @@
 pub mod admin;
 pub mod api;
+pub mod audio;
 pub mod auth;
 pub mod billing;
 pub mod embed;

@@ -60,6 +60,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .merge(routes::admin::routes())
         .merge(routes::ws::routes())
         .merge(routes::embed::routes())
+        .merge(routes::audio::routes())
         .layer(cors)
         .layer(RequestBodyLimitLayer::new(1024 * 1024))
         .layer(TimeoutLayer::new(std::time::Duration::from_secs(

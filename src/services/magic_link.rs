@@ -20,9 +20,15 @@ fn hash_magic_token(token: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// Recovery request result
+pub struct RecoveryRequest {
+    pub token: String,
+    pub server_share: Option<String>,
+}
+
 /// Request a magic link for email
-/// Returns the token (to be sent via email)
-pub async fn request_magic_link(db: &PgPool, email: &str) -> Result<String> {
+/// Returns the token (to be sent via email) and server_share if available
+pub async fn request_magic_link(db: &PgPool, email: &str) -> Result<RecoveryRequest> {
     let email = email.to_lowercase().trim().to_string();
 
     // basic email validation
@@ -45,6 +51,16 @@ pub async fn request_magic_link(db: &PgPool, email: &str) -> Result<String> {
         return Err(ApiError::RateLimited);
     }
 
+    // look up recovery_share for this email
+    let user_row: Option<(Option<String>,)> = sqlx::query_as(
+        "SELECT recovery_share FROM users WHERE email = $1"
+    )
+    .bind(&email)
+    .fetch_optional(db)
+    .await?;
+
+    let server_share = user_row.and_then(|r| r.0);
+
     let token = generate_magic_token();
     let token_hash = hash_magic_token(&token);
     let expires = chrono::Utc::now() + chrono::Duration::minutes(15);
@@ -61,7 +77,7 @@ pub async fn request_magic_link(db: &PgPool, email: &str) -> Result<String> {
     .execute(db)
     .await?;
 
-    Ok(token)
+    Ok(RecoveryRequest { token, server_share })
 }
 
 /// Verify magic link and create session

@@ -61,6 +61,8 @@ pub async fn check_nickname(
 pub struct RegisterRequest {
     nickname: String,
     public_key: String,
+    email: Option<String>,
+    recovery_share: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -81,7 +83,13 @@ pub async fn register(
     let mut redis = state.redis.clone();
     user_auth::check_rate_limit(&mut redis, "register", &req.public_key).await?;
 
-    let result = user_auth::register_with_pubkey(&state.db, &req.nickname, &req.public_key).await;
+    let result = user_auth::register_with_pubkey(
+        &state.db,
+        &req.nickname,
+        &req.public_key,
+        req.email.as_deref(),
+        req.recovery_share.as_deref(),
+    ).await;
 
     match result {
         Ok(user) => {
@@ -180,23 +188,30 @@ pub struct RequestMagicLinkRequest {
 }
 
 #[derive(Debug, Serialize)]
-pub struct MessageResponse {
+pub struct MagicLinkResponse {
     message: String,
+    server_share: Option<String>,
 }
 
 /// Request a magic link email
 pub async fn request_magic_link(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RequestMagicLinkRequest>,
-) -> Result<Json<MessageResponse>> {
-    let token = magic_link::request_magic_link(&state.db, &req.email).await?;
+) -> Result<Json<MagicLinkResponse>> {
+    let recovery = magic_link::request_magic_link(&state.db, &req.email).await?;
 
-    // send email
+    // send email with the token
     let base_url = std::env::var("APP_URL").unwrap_or_else(|_| "https://app.sonotxt.com".into());
-    magic_link::send_magic_link_email(&req.email, &token, &base_url).await?;
+    magic_link::send_magic_link_email(&req.email, &recovery.token, &base_url).await?;
 
-    Ok(Json(MessageResponse {
-        message: "Check your email for the login link".into(),
+    // return server_share if user has shamir recovery setup
+    Ok(Json(MagicLinkResponse {
+        message: if recovery.server_share.is_some() {
+            "Recovery share sent. Enter your saved recovery words to complete recovery.".into()
+        } else {
+            "Check your email for the login link".into()
+        },
+        server_share: recovery.server_share,
     }))
 }
 

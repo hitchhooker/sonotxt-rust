@@ -102,6 +102,7 @@ struct ExtractRequest {
 #[derive(Debug, Serialize)]
 struct ExtractResponse {
     text: String,
+    title: Option<String>,
     char_count: usize,
     word_count: usize,
 }
@@ -111,12 +112,13 @@ async fn extract(
     Json(req): Json<ExtractRequest>,
 ) -> Result<Json<ExtractResponse>> {
     let content = extract_content(&state, &req.url, req.selector.as_deref()).await?;
-    let word_count = content.split_whitespace().count();
+    let word_count = content.text.split_whitespace().count();
 
     Ok(Json(ExtractResponse {
-        char_count: content.len(),
+        char_count: content.text.len(),
         word_count,
-        text: content,
+        title: content.title,
+        text: content.text,
     }))
 }
 
@@ -125,7 +127,8 @@ async fn process(
     user: AuthenticatedUser,
     Json(req): Json<ProcessRequest>,
 ) -> Result<Json<ProcessResponse>> {
-    let content = extract_content(&state, &req.url, req.selector.as_deref()).await?;
+    let extracted = extract_content(&state, &req.url, req.selector.as_deref()).await?;
+    let content = extracted.text;
     let estimated_cost = (content.len() as f64) * state.config.cost_per_char;
 
     // Check balance from database
