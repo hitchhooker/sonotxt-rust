@@ -2,6 +2,7 @@ use crate::{error::Result, services::storage::{StorageBackend, StorageService}, 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use tokio::process::Command;
 use tokio::time::{sleep, Duration};
 use tracing::{error, info, warn};
 
@@ -127,11 +128,27 @@ async fn process_next_job(state: &Arc<AppState>, storage: &StorageService) -> Re
     let storage_type = job.storage_type.as_deref().unwrap_or(&state.config.default_storage);
     let backend = StorageBackend::from(storage_type);
 
-    // Call Kokoro TTS
+    // Call Kokoro TTS (outputs opus directly)
     match generate_tts_kokoro(state, &text, voice).await {
         Ok(result) => {
-            let filename = format!("{}.mp3", job.id);
-            match storage.upload(&filename, &result.audio_data, "audio/mpeg", backend).await {
+            // opus from API, wrap in ogg container if needed
+            let (audio_data, filename, content_type) = if result.format == "opus" {
+                // wrap raw opus in ogg container for browser compatibility
+                match wrap_opus_in_ogg(&result.audio_data).await {
+                    Ok(ogg_data) => (ogg_data, format!("{}.ogg", job.id), "audio/ogg"),
+                    Err(e) => {
+                        warn!("ogg wrapping failed, storing raw opus: {:?}", e);
+                        (result.audio_data.clone(), format!("{}.opus", job.id), "audio/opus")
+                    }
+                }
+            } else {
+                // fallback for other formats
+                let ext = if result.format == "mp3" { "mp3" } else { "wav" };
+                let ct = if result.format == "mp3" { "audio/mpeg" } else { "audio/wav" };
+                (result.audio_data.clone(), format!("{}.{}", job.id, ext), ct)
+            };
+
+            match storage.upload(&filename, &audio_data, content_type, backend).await {
                 Ok(upload_result) => {
                     let runtime_ms = result.runtime_ms.map(|ms| ms as i32);
                     let pinning_cost = upload_result.pinning_cost;
@@ -174,10 +191,11 @@ async fn process_next_job(state: &Arc<AppState>, storage: &StorageService) -> Re
                     };
 
                     info!(
-                        "Job {} completed: {:.1}s audio, {} bytes, runtime {}ms, cost ${:.6}, storage: {}",
+                        "Job {} completed: {:.1}s audio, {} bytes ({}), runtime {}ms, cost ${:.6}, storage: {}",
                         job.id,
                         result.duration_seconds,
-                        result.audio_data.len(),
+                        audio_data.len(),
+                        result.format,
                         result.runtime_ms.unwrap_or(0),
                         result.cost.unwrap_or(0.0),
                         storage_info
@@ -200,10 +218,62 @@ async fn process_next_job(state: &Arc<AppState>, storage: &StorageService) -> Re
 
 struct TtsResult {
     audio_data: Vec<u8>,
+    format: String,
     duration_seconds: f64,
     runtime_ms: Option<i64>,
     cost: Option<f64>,
     request_id: Option<String>,
+}
+
+/// wrap raw opus in ogg container using ffmpeg (for browser compatibility)
+async fn wrap_opus_in_ogg(opus_data: &[u8]) -> Result<Vec<u8>> {
+    use std::process::Stdio;
+    use tokio::io::AsyncWriteExt;
+
+    // DeepInfra opus output might already be in ogg container
+    // Check for OggS magic bytes
+    if opus_data.len() > 4 && &opus_data[0..4] == b"OggS" {
+        // Already in ogg container, return as-is
+        return Ok(opus_data.to_vec());
+    }
+
+    // Wrap raw opus in ogg container
+    let mut child = Command::new("ffmpeg")
+        .args([
+            "-f", "opus",        // input format: raw opus
+            "-i", "pipe:0",      // input from stdin
+            "-c:a", "copy",      // copy codec (no re-encoding)
+            "-f", "ogg",         // output format: ogg container
+            "pipe:1"             // output to stdout
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            error!("failed to spawn ffmpeg: {:?}", e);
+            crate::error::ApiError::ProcessingFailed
+        })?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin.write_all(opus_data).await.map_err(|e| {
+            error!("failed to write to ffmpeg stdin: {:?}", e);
+            crate::error::ApiError::ProcessingFailed
+        })?;
+    }
+
+    let output = child.wait_with_output().await.map_err(|e| {
+        error!("ffmpeg process failed: {:?}", e);
+        crate::error::ApiError::ProcessingFailed
+    })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        error!("ffmpeg ogg wrapping failed: {}", stderr);
+        return Err(crate::error::ApiError::ProcessingFailed);
+    }
+
+    Ok(output.stdout)
 }
 
 async fn generate_tts_kokoro(state: &AppState, text: &str, voice: &str) -> Result<TtsResult> {
@@ -213,9 +283,12 @@ async fn generate_tts_kokoro(state: &AppState, text: &str, voice: &str) -> Resul
         .as_ref()
         .ok_or(crate::error::ApiError::InternalError)?;
 
+    // request opus for best compression, fallback handled by API
+    let output_format = "opus";
+
     let request = KokoroRequest {
         text: text.to_string(),
-        output_format: "mp3".to_string(),
+        output_format: output_format.to_string(),
         preset_voice: vec![voice.to_string()],
         speed: 1.0,
     };
@@ -266,11 +339,13 @@ async fn generate_tts_kokoro(state: &AppState, text: &str, voice: &str) -> Resul
         crate::error::ApiError::ProcessingFailed
     })?;
 
-    // Estimate duration based on audio size (MP3 ~64kbps = 8KB/sec for 24kHz mono)
+    // Estimate duration based on audio size
+    // opus ~64kbps = 8KB/sec, mp3 similar
     let duration_seconds = audio_data.len() as f64 / 8000.0;
 
     Ok(TtsResult {
         audio_data,
+        format: output_format.to_string(),
         duration_seconds,
         runtime_ms,
         cost,

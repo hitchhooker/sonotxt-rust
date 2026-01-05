@@ -46,6 +46,7 @@ getrandom = "0.2"
 # hardware-secured payment processor
 hwpay = { path = "../../hwpay", features = ["penumbra"] }
 secrecy = "0.10"
+async-trait = "0.1"
 
 [dev-dependencies]
 tempfile = "3"

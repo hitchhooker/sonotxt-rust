@@ -21,6 +21,9 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/register", post(register))
         .route("/challenge", post(get_challenge))
         .route("/verify", post(verify))
+        // direct public key auth (no nickname required)
+        .route("/pubkey/challenge", post(get_pubkey_challenge))
+        .route("/pubkey/verify", post(verify_pubkey))
         // magic link auth
         .route("/magic-link/request", post(request_magic_link))
         .route("/magic-link/verify", post(verify_magic_link))
@@ -165,6 +168,75 @@ pub async fn verify(
         Ok((user, token)) => {
             // clear rate limit on success
             user_auth::clear_rate_limit(&mut redis, "login", &nick_hash).await;
+
+            Ok(Json(AuthResponse {
+                user_id: user.id.to_string(),
+                nickname: user.nickname,
+                email: user.email,
+                balance: user.balance,
+                token: Some(token),
+            }))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+// ============================================================================
+// Direct public key auth endpoints (no nickname required)
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct PubkeyChallengeRequest {
+    public_key: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PubkeyChallengeResponse {
+    challenge: String,
+}
+
+/// Get a challenge to sign for direct public key login
+/// User will be created automatically on first successful verification
+pub async fn get_pubkey_challenge(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<PubkeyChallengeRequest>,
+) -> Result<Json<PubkeyChallengeResponse>> {
+    // rate limit by public key
+    let mut redis = state.redis.clone();
+    user_auth::check_rate_limit(&mut redis, "pubkey_challenge", &req.public_key).await?;
+
+    let challenge = user_auth::get_pubkey_challenge(&state.db, &req.public_key).await?;
+
+    Ok(Json(PubkeyChallengeResponse { challenge }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct VerifyPubkeyRequest {
+    public_key: String,
+    challenge: String,
+    signature: String,
+}
+
+/// Verify signature for direct public key login
+/// Creates user account if it doesn't exist
+pub async fn verify_pubkey(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<VerifyPubkeyRequest>,
+) -> Result<Json<AuthResponse>> {
+    // rate limit by public key
+    let mut redis = state.redis.clone();
+    user_auth::check_rate_limit(&mut redis, "pubkey_login", &req.public_key).await?;
+
+    let result = user_auth::verify_pubkey_login(
+        &state.db,
+        &req.public_key,
+        &req.challenge,
+        &req.signature,
+    ).await;
+
+    match result {
+        Ok((user, token)) => {
+            user_auth::clear_rate_limit(&mut redis, "pubkey_login", &req.public_key).await;
 
             Ok(Json(AuthResponse {
                 user_id: user.id.to_string(),

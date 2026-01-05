@@ -269,6 +269,208 @@ pub async fn register_with_pubkey(
     })
 }
 
+/// Register with just a public key (no nickname)
+/// This enables direct crypto account identity
+pub async fn register_with_pubkey_only(
+    db: &PgPool,
+    public_key: &str,
+) -> Result<User> {
+    // Validate public key
+    if let Err(e) = validate_public_key(public_key) {
+        return Err(ApiError::InvalidRequest(e.to_string()));
+    }
+
+    // Check public key not already registered
+    let existing: Option<(Uuid, Option<String>, Option<String>, Option<String>, f64)> = sqlx::query_as(
+        "SELECT id, nickname, email, public_key, balance::float8 FROM users WHERE public_key = $1"
+    )
+    .bind(public_key)
+    .fetch_optional(db)
+    .await?;
+
+    if let Some((id, nickname, email, pk, balance)) = existing {
+        // User already exists, return existing user
+        return Ok(User {
+            id,
+            nickname,
+            email,
+            public_key: pk,
+            balance,
+        });
+    }
+
+    // Use public key as identifier hash (for lookup)
+    let identifier_hash = format!("pk:{}", public_key);
+
+    let user: (Uuid, Option<String>, Option<String>, Option<String>, f64) = sqlx::query_as(
+        r#"
+        INSERT INTO users (public_key, identifier_hash)
+        VALUES ($1, $2)
+        RETURNING id, nickname, email, public_key, balance::float8
+        "#,
+    )
+    .bind(public_key)
+    .bind(&identifier_hash)
+    .fetch_one(db)
+    .await?;
+
+    Ok(User {
+        id: user.0,
+        nickname: user.1,
+        email: user.2,
+        public_key: user.3,
+        balance: user.4,
+    })
+}
+
+/// Get challenge for direct public key login (no nickname)
+pub async fn get_pubkey_challenge(db: &PgPool, public_key: &str) -> Result<String> {
+    // Validate public key format
+    if let Err(e) = validate_public_key(public_key) {
+        return Err(ApiError::InvalidRequest(e.to_string()));
+    }
+
+    // Check if user exists
+    let user_exists: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT id FROM users WHERE public_key = $1"
+    )
+    .bind(public_key)
+    .fetch_optional(db)
+    .await?;
+
+    let challenge = generate_challenge();
+
+    if user_exists.is_some() {
+        // Store challenge
+        let expires = chrono::Utc::now() + chrono::Duration::minutes(5);
+        sqlx::query(
+            r#"
+            INSERT INTO auth_challenges (public_key, challenge, expires_at)
+            VALUES ($1, $2, $3)
+            "#,
+        )
+        .bind(public_key)
+        .bind(&challenge)
+        .bind(expires)
+        .execute(db)
+        .await?;
+    }
+    // For non-existent users, we still return a challenge to prevent enumeration
+    // But we don't store it, so verification will fail
+
+    Ok(challenge)
+}
+
+/// Verify signature for direct public key login and create session
+/// If user doesn't exist, registers them automatically
+pub async fn verify_pubkey_login(
+    db: &PgPool,
+    public_key: &str,
+    challenge: &str,
+    signature: &str,
+) -> Result<(User, String)> {
+    // Validate public key format
+    if let Err(e) = validate_public_key(public_key) {
+        return Err(ApiError::InvalidRequest(e.to_string()));
+    }
+
+    // Verify signature first (before checking user/challenge)
+    if !verify_signature(public_key, challenge, signature) {
+        return Err(ApiError::InvalidCredentials);
+    }
+
+    // Get or create user
+    let user = get_or_create_user_by_pubkey(db, public_key).await?;
+
+    // Check if challenge exists (for existing users)
+    let challenge_row: Option<(Uuid,)> = sqlx::query_as(
+        r#"
+        SELECT id FROM auth_challenges
+        WHERE public_key = $1 AND challenge = $2 AND expires_at > NOW()
+        "#,
+    )
+    .bind(public_key)
+    .bind(challenge)
+    .fetch_optional(db)
+    .await?;
+
+    // Delete used challenge if it exists
+    if let Some((challenge_id,)) = challenge_row {
+        sqlx::query("DELETE FROM auth_challenges WHERE id = $1")
+            .bind(challenge_id)
+            .execute(db)
+            .await?;
+    }
+
+    // Create session
+    let token = generate_session_token();
+    let token_hash = hash_token(&token);
+    let expires = chrono::Utc::now() + chrono::Duration::days(30);
+
+    sqlx::query(
+        r#"
+        INSERT INTO sessions (user_id, token_hash, expires_at)
+        VALUES ($1, $2, $3)
+        "#,
+    )
+    .bind(user.id)
+    .bind(&token_hash)
+    .bind(expires)
+    .execute(db)
+    .await?;
+
+    // Update last login
+    sqlx::query("UPDATE users SET last_login = NOW() WHERE id = $1")
+        .bind(user.id)
+        .execute(db)
+        .await?;
+
+    Ok((user, token))
+}
+
+/// Get existing user by public key or create new one
+async fn get_or_create_user_by_pubkey(db: &PgPool, public_key: &str) -> Result<User> {
+    // Try to get existing user
+    let existing: Option<(Uuid, Option<String>, Option<String>, Option<String>, f64)> = sqlx::query_as(
+        "SELECT id, nickname, email, public_key, balance::float8 FROM users WHERE public_key = $1"
+    )
+    .bind(public_key)
+    .fetch_optional(db)
+    .await?;
+
+    if let Some((id, nickname, email, pk, balance)) = existing {
+        return Ok(User {
+            id,
+            nickname,
+            email,
+            public_key: pk,
+            balance,
+        });
+    }
+
+    // Create new user with just public key
+    let identifier_hash = format!("pk:{}", public_key);
+    let user: (Uuid, Option<String>, Option<String>, Option<String>, f64) = sqlx::query_as(
+        r#"
+        INSERT INTO users (public_key, identifier_hash)
+        VALUES ($1, $2)
+        RETURNING id, nickname, email, public_key, balance::float8
+        "#,
+    )
+    .bind(public_key)
+    .bind(&identifier_hash)
+    .fetch_one(db)
+    .await?;
+
+    Ok(User {
+        id: user.0,
+        nickname: user.1,
+        email: user.2,
+        public_key: user.3,
+        balance: user.4,
+    })
+}
+
 /// Get challenge for nickname-based login
 /// Returns (challenge, public_key) so client can verify they're signing for the right key
 /// NOTE: Returns fake challenge for non-existent users to prevent enumeration

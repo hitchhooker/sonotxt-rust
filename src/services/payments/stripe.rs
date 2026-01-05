@@ -54,6 +54,30 @@ struct StripeEventData {
     object: serde_json::Value,
 }
 
+/// Supported currencies
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Currency {
+    #[default]
+    Eur,
+    Usd,
+}
+
+impl Currency {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Currency::Eur => "eur",
+            Currency::Usd => "usd",
+        }
+    }
+
+    pub fn symbol(&self) -> &'static str {
+        match self {
+            Currency::Eur => "€",
+            Currency::Usd => "$",
+        }
+    }
+}
+
 impl StripeService {
     pub fn new(config: &Config) -> Self {
         Self {
@@ -62,18 +86,28 @@ impl StripeService {
         }
     }
 
-    /// create a checkout session for credit purchase
+    /// create a checkout session for credit purchase (EUR default for EU)
     pub async fn create_checkout_session(
         &self,
         account_id: Uuid,
-        amount_usd: f64,
+        amount: f64,
+    ) -> Result<String> {
+        self.create_checkout_session_with_currency(account_id, amount, Currency::Eur).await
+    }
+
+    /// create a checkout session with specific currency
+    pub async fn create_checkout_session_with_currency(
+        &self,
+        account_id: Uuid,
+        amount: f64,
+        currency: Currency,
     ) -> Result<String> {
         let secret_key = self
             .secret_key
             .as_ref()
             .ok_or_else(|| ApiError::Internal("stripe not configured".into()))?;
 
-        let amount_cents = (amount_usd * 100.0) as i64;
+        let amount_cents = (amount * 100.0) as i64;
 
         let request = CreateCheckoutSessionRequest {
             mode: "payment".into(),
@@ -85,10 +119,10 @@ impl StripeService {
             client_reference_id: account_id.to_string(),
             line_items: vec![LineItem {
                 price_data: PriceData {
-                    currency: "usd".into(),
+                    currency: currency.as_str().into(),
                     unit_amount: amount_cents,
                     product_data: ProductData {
-                        name: format!("${:.2} SonoTxt Credits", amount_usd),
+                        name: format!("{}{:.2} SonoTxt Credits", currency.symbol(), amount),
                     },
                 },
                 quantity: 1,
@@ -217,7 +251,14 @@ impl StripeService {
             .get("amount_total")
             .and_then(|v| v.as_i64())
             .unwrap_or(0);
-        let amount_usd = amount_cents as f64 / 100.0;
+        let amount = amount_cents as f64 / 100.0;
+
+        // get currency from session (default EUR for EU company)
+        let currency = session
+            .get("currency")
+            .and_then(|v| v.as_str())
+            .unwrap_or("eur")
+            .to_uppercase();
 
         let payment_id = session
             .get("payment_intent")
@@ -243,19 +284,20 @@ impl StripeService {
         sqlx::query(
             r#"
             INSERT INTO deposits (id, account_id, chain, tx_hash, asset, amount, status, confirmations)
-            VALUES ($1, $2, 'stripe', $3, 'USD', $4, 'confirmed', 1)
+            VALUES ($1, $2, 'stripe', $3, $4, $5, 'confirmed', 1)
             "#,
         )
         .bind(deposit_id)
         .bind(account_id)
         .bind(&payment_id)
-        .bind(amount_usd)
+        .bind(&currency)
+        .bind(amount)
         .execute(db)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-        // credit account
-        super::credit_deposit(db, deposit_id, account_id, amount_usd, "stripe", &payment_id).await?;
+        // credit account (amount is in the original currency, stored as credits)
+        super::credit_deposit(db, deposit_id, account_id, amount, "stripe", &payment_id).await?;
 
         Ok(())
     }

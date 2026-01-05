@@ -39,6 +39,8 @@ pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/admin/apikey", post(create_api_key))
         .route("/admin/embed-sig", post(create_embed_sig))
+        .route("/admin/vault/seal-stripe", post(seal_stripe_secrets))
+        .route("/admin/vault/status", post(vault_status))
 }
 
 async fn create_api_key(
@@ -175,5 +177,104 @@ async fn create_embed_sig(
         domain: req.domain,
         sig,
         embed_code,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct SealStripeRequest {
+    secret_key: String,
+    webhook_secret: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SealStripeResponse {
+    sealed: bool,
+    storage_method: String,
+    tpm_available: bool,
+}
+
+/// Seal Stripe secrets to TPM-secured vault
+async fn seal_stripe_secrets(
+    State(state): State<Arc<AppState>>,
+    TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
+    Json(req): Json<SealStripeRequest>,
+) -> Result<Json<SealStripeResponse>> {
+    // verify admin token
+    let is_valid = match &state.config.admin_token {
+        Some(token) => {
+            let a = token.as_bytes();
+            let b = auth.token().as_bytes();
+            a.len() == b.len() && a.ct_eq(b).into()
+        }
+        None => false,
+    };
+
+    if !is_valid {
+        return Err(crate::error::ApiError::Unauthorized);
+    }
+
+    let mut payments = state.payments.write().await;
+    let vault = payments.vault_mut();
+
+    // Seal secret key
+    let method = vault.store(hwpay::SecretId::StripeSecretKey, req.secret_key.as_bytes())
+        .map_err(|e| crate::error::ApiError::Internal(format!("failed to seal secret key: {}", e)))?;
+
+    // Seal webhook secret if provided
+    if let Some(webhook_secret) = req.webhook_secret {
+        vault.store(hwpay::SecretId::StripeWebhookSecret, webhook_secret.as_bytes())
+            .map_err(|e| crate::error::ApiError::Internal(format!("failed to seal webhook secret: {}", e)))?;
+    }
+
+    let storage_method = match method {
+        hwpay::StorageMethod::Tpm => "tpm",
+        hwpay::StorageMethod::EncryptedFile => "encrypted_file",
+    };
+
+    tracing::info!("stripe secrets sealed to vault using {}", storage_method);
+
+    Ok(Json(SealStripeResponse {
+        sealed: true,
+        storage_method: storage_method.to_string(),
+        tpm_available: vault.uses_tpm(),
+    }))
+}
+
+#[derive(Debug, Serialize)]
+struct VaultStatusResponse {
+    tpm_available: bool,
+    uses_tpm: bool,
+    secrets: Vec<String>,
+}
+
+/// Get vault status
+async fn vault_status(
+    State(state): State<Arc<AppState>>,
+    TypedHeader(auth): TypedHeader<Authorization<Bearer>>,
+) -> Result<Json<VaultStatusResponse>> {
+    // verify admin token
+    let is_valid = match &state.config.admin_token {
+        Some(token) => {
+            let a = token.as_bytes();
+            let b = auth.token().as_bytes();
+            a.len() == b.len() && a.ct_eq(b).into()
+        }
+        None => false,
+    };
+
+    if !is_valid {
+        return Err(crate::error::ApiError::Unauthorized);
+    }
+
+    let payments = state.payments.read().await;
+    let vault = payments.vault();
+    let status = vault.status();
+
+    let secrets: Vec<String> = status.secrets.iter().map(|s| format!("{:?}", s)).collect();
+
+    Ok(Json(VaultStatusResponse {
+        tpm_available: status.tpm_available,
+        uses_tpm: status.uses_tpm,
+        secrets,
     }))
 }

@@ -12339,6 +12339,7 @@ name = "sonotxt"
 version = "0.1.0"
 dependencies = [
  "argon2",
+ "async-trait",
  "aws-config",
  "aws-credential-types",
  "aws-sdk-s3",

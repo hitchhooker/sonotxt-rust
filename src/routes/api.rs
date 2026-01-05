@@ -1,5 +1,8 @@
 use axum::{
-    extract::{Query, State},
+    body::Body,
+    extract::{Path, Query, State},
+    http::header,
+    response::{IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -61,6 +64,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/extract", post(extract))
         .route("/status", get(status))
         .route("/voices", get(list_voices))
+        .route("/download/{job_id}", get(download_audio))
 }
 
 async fn list_voices(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
@@ -399,4 +403,54 @@ async fn status(
         }
         _ => Ok(Json(JobStatus::Queued { position: None, estimated_seconds })),
     }
+}
+
+async fn download_audio(
+    State(state): State<Arc<AppState>>,
+    Path(job_id): Path<String>,
+) -> Result<impl IntoResponse> {
+    // get audio url from job - audio_url is nullable TEXT so we get Option<Option<String>>
+    let audio_url: String = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT audio_url FROM jobs WHERE id = $1 AND status = 'completed'"
+    )
+    .bind(&job_id)
+    .fetch_optional(&state.db)
+    .await?
+    .flatten() // Option<Option<String>> -> Option<String>
+    .ok_or(crate::error::ApiError::NotFound)?;
+
+    // fetch audio from storage
+    let client = reqwest::Client::new();
+    let response = client
+        .get(&audio_url)
+        .send()
+        .await
+        .map_err(|_| crate::error::ApiError::InternalError)?;
+
+    if !response.status().is_success() {
+        return Err(crate::error::ApiError::NotFound);
+    }
+
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|_| crate::error::ApiError::InternalError)?;
+
+    // detect format from url extension
+    let (extension, content_type) = if audio_url.ends_with(".ogg") {
+        ("ogg", "audio/ogg")
+    } else {
+        ("mp3", "audio/mpeg")
+    };
+
+    let filename = format!("sonotxt-{}.{}", job_id, extension);
+
+    Ok(Response::builder()
+        .header(header::CONTENT_TYPE, content_type)
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{}\"", filename),
+        )
+        .body(Body::from(bytes))
+        .unwrap())
 }

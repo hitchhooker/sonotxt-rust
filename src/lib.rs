@@ -14,6 +14,7 @@ use axum::{http::Method, Router};
 use redis::aio::ConnectionManager;
 use sqlx::PgPool;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 use tower_http::{
     cors::{Any, CorsLayer},
     limit::RequestBodyLimitLayer,
@@ -27,6 +28,8 @@ pub struct AppState {
     pub redis: ConnectionManager,
     pub http: reqwest::Client,
     pub db: PgPool,
+    /// hwpay payment processor with TPM-sealed secrets
+    pub payments: Arc<RwLock<hwpay::PaymentProcessor>>,
 }
 
 fn build_cors(origins: &str) -> CorsLayer {

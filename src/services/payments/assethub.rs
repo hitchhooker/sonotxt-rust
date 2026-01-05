@@ -1,4 +1,5 @@
-use serde::Deserialize;
+//! asset hub deposit listener with proper subxt event decoding
+
 use sqlx::PgPool;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -12,35 +13,12 @@ const _USDT_DECIMALS: u32 = 6;
 /// default maximum addresses per user if not configured
 const DEFAULT_MAX_ADDRESSES: i64 = 5;
 
-pub struct AssetHubListener {
+pub struct AssetHubService {
     state: Arc<AppState>,
     max_addresses_per_user: i64,
 }
 
-#[derive(Deserialize, Debug)]
-struct RpcResponse<T> {
-    result: Option<T>,
-    #[allow(dead_code)]
-    error: Option<serde_json::Value>,
-}
-
-#[derive(Deserialize, Debug)]
-struct BlockHeader {
-    number: String,
-}
-
-#[derive(Deserialize, Debug)]
-struct SignedBlock {
-    block: Block,
-}
-
-#[derive(Deserialize, Debug)]
-struct Block {
-    header: BlockHeader,
-    extrinsics: Vec<String>,
-}
-
-impl AssetHubListener {
+impl AssetHubService {
     pub fn new(state: Arc<AppState>) -> Self {
         Self {
             state,
@@ -207,147 +185,7 @@ impl AssetHubListener {
         Ok(rows)
     }
 
-    /// run the deposit listener (background task)
-    pub async fn run(&self) -> Result<()> {
-        tracing::info!("starting assethub listener at {}", self.state.config.assethub_rpc);
-
-        let mut last_block: u64 = 0;
-
-        loop {
-            match self.poll_blocks(&mut last_block).await {
-                Ok(_) => {}
-                Err(e) => {
-                    tracing::error!("assethub poll error: {}", e);
-                }
-            }
-            tokio::time::sleep(tokio::time::Duration::from_secs(6)).await;
-        }
-    }
-
-    async fn poll_blocks(&self, last_block: &mut u64) -> Result<()> {
-        let rpc_url = self.state.config.assethub_rpc.replace("wss://", "https://").replace("ws://", "http://");
-
-        // get latest finalized block
-        let resp: RpcResponse<String> = self
-            .state
-            .http
-            .post(&rpc_url)
-            .json(&serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "chain_getFinalizedHead",
-                "params": []
-            }))
-            .send()
-            .await
-            .map_err(|e| ApiError::Internal(e.to_string()))?
-            .json()
-            .await
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-        let head_hash = resp.result.ok_or_else(|| ApiError::Internal("no finalized head".into()))?;
-
-        // get block
-        let block_resp: RpcResponse<SignedBlock> = self
-            .state
-            .http
-            .post(&rpc_url)
-            .json(&serde_json::json!({
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "chain_getBlock",
-                "params": [head_hash]
-            }))
-            .send()
-            .await
-            .map_err(|e| ApiError::Internal(e.to_string()))?
-            .json()
-            .await
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-        let block = block_resp.result.ok_or_else(|| ApiError::Internal("no block".into()))?;
-        let block_num = u64::from_str_radix(&block.block.header.number[2..], 16)
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-        if block_num <= *last_block {
-            return Ok(());
-        }
-
-        tracing::debug!("processing block {}", block_num);
-        *last_block = block_num;
-
-        // process extrinsics
-        for (idx, ext) in block.block.extrinsics.iter().enumerate() {
-            self.process_extrinsic(ext, block_num, idx).await;
-        }
-
-        Ok(())
-    }
-
-    async fn process_extrinsic(&self, ext_hex: &str, _block_num: u64, _idx: usize) {
-        let _ext_bytes = match hex::decode(ext_hex.trim_start_matches("0x")) {
-            Ok(b) => b,
-            Err(_) => return,
-        };
-
-        // check for assets pallet transfers
-        // real implementation needs proper SCALE decoding
-        self.check_pending_deposits().await;
-    }
-
-    async fn check_pending_deposits(&self) {
-        let pending: Vec<(Uuid, Uuid, f64, String)> = match sqlx::query_as(
-            r#"
-            SELECT id, account_id, amount, tx_hash
-            FROM deposits
-            WHERE chain = 'polkadot_assethub' AND status = 'pending'
-            "#,
-        )
-        .fetch_all(&self.state.db)
-        .await
-        {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-
-        for (deposit_id, account_id, amount, tx_hash) in pending {
-            let created: chrono::DateTime<chrono::Utc> = match sqlx::query_scalar(
-                "SELECT created_at FROM deposits WHERE id = $1",
-            )
-            .bind(deposit_id)
-            .fetch_one(&self.state.db)
-            .await
-            {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-
-            // auto-confirm after 2 minutes (placeholder)
-            if chrono::Utc::now() - created > chrono::Duration::minutes(2) {
-                let _ = sqlx::query(
-                    "UPDATE deposits SET status = 'confirmed', confirmations = 1 WHERE id = $1",
-                )
-                .bind(deposit_id)
-                .execute(&self.state.db)
-                .await;
-
-                if let Err(e) = super::credit_deposit(
-                    &self.state.db,
-                    deposit_id,
-                    account_id,
-                    amount,
-                    "polkadot_assethub",
-                    &tx_hash,
-                )
-                .await
-                {
-                    tracing::error!("failed to credit deposit: {}", e);
-                }
-            }
-        }
-    }
-
-    /// manually record a deposit
+    /// manually record a deposit (detected off-chain or via RPC)
     pub async fn record_deposit(
         db: &PgPool,
         account_id: Uuid,
@@ -385,3 +223,145 @@ impl AssetHubListener {
         Ok(deposit_id)
     }
 }
+
+/// deposit listener using hwpay's subxt-based event decoder
+pub struct AssetHubListener {
+    state: Arc<AppState>,
+    hwpay_listener: hwpay::AssetHubListener,
+}
+
+impl AssetHubListener {
+    pub fn new(state: Arc<AppState>) -> Self {
+        let rpc_url = state.config.assethub_rpc.clone();
+        let hwpay_listener = hwpay::AssetHubListener::with_rpc_url(&rpc_url);
+        Self { state, hwpay_listener }
+    }
+
+    /// load all active watched addresses from db
+    async fn load_watched_addresses(&self) -> Result<()> {
+        let rows: Vec<(String, Uuid, i32)> = sqlx::query_as(
+            r#"
+            SELECT address, account_id, derivation_index
+            FROM payment_addresses
+            WHERE chain = 'polkadot_assethub' AND is_active = true
+            "#,
+        )
+        .fetch_all(&self.state.db)
+        .await
+        .map_err(|e| ApiError::Internal(e.to_string()))?;
+
+        let count = rows.len();
+        for (address, account_id, derivation_index) in rows {
+            self.hwpay_listener.watch(
+                address,
+                account_id.to_string(),
+                derivation_index as u32,
+            ).await;
+        }
+
+        tracing::info!("loaded {} watched addresses", count);
+        Ok(())
+    }
+
+    /// run the deposit listener (background task)
+    pub async fn run(&mut self) -> Result<()> {
+        tracing::info!("starting assethub listener at {}", self.state.config.assethub_rpc);
+
+        // connect to the network
+        self.hwpay_listener.connect().await
+            .map_err(|e| ApiError::Internal(format!("failed to connect: {}", e)))?;
+
+        // load watched addresses
+        self.load_watched_addresses().await?;
+
+        // create callback that records deposits
+        let callback = DepositHandler {
+            db: self.state.db.clone(),
+        };
+
+        // run the listener
+        self.hwpay_listener.run(callback).await
+            .map_err(|e| ApiError::Internal(format!("listener error: {}", e)))?;
+
+        Ok(())
+    }
+
+    /// add address to watch list
+    pub async fn watch(&self, address: String, account_id: Uuid, index: u32) {
+        self.hwpay_listener.watch(address, account_id.to_string(), index).await;
+    }
+
+    /// remove address from watch list
+    pub async fn unwatch(&self, address: &str) {
+        self.hwpay_listener.unwatch(address).await;
+    }
+}
+
+/// callback handler for hwpay deposits
+struct DepositHandler {
+    db: PgPool,
+}
+
+#[async_trait::async_trait]
+impl hwpay::DepositCallback for DepositHandler {
+    async fn on_deposit(&self, deposit: hwpay::Deposit) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let account_id = Uuid::parse_str(&deposit.user_id)?;
+
+        // check for duplicate
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM deposits WHERE tx_hash = $1)"
+        )
+        .bind(&deposit.tx_hash)
+        .fetch_one(&self.db)
+        .await?;
+
+        if exists {
+            tracing::debug!("deposit already recorded: {}", deposit.tx_hash);
+            return Ok(());
+        }
+
+        // record the deposit
+        let deposit_id = Uuid::new_v4();
+        let asset = format!("{}", deposit.asset);
+
+        sqlx::query(
+            r#"
+            INSERT INTO deposits (id, account_id, chain, tx_hash, asset, amount, block_number, from_address, to_address, status, confirmations)
+            VALUES ($1, $2, 'polkadot_assethub', $3, $4, $5, $6, $7, $8, 'confirmed', 1)
+            "#,
+        )
+        .bind(deposit_id)
+        .bind(account_id)
+        .bind(&deposit.tx_hash)
+        .bind(&asset)
+        .bind(deposit.amount)
+        .bind(deposit.block_number as i64)
+        .bind(&deposit.from)
+        .bind(&deposit.to)
+        .execute(&self.db)
+        .await?;
+
+        tracing::info!(
+            "recorded deposit {} for account {}: {} {}",
+            deposit_id,
+            account_id,
+            deposit.amount,
+            asset
+        );
+
+        // credit immediately since we're already on finalized blocks
+        super::credit_deposit(
+            &self.db,
+            deposit_id,
+            account_id,
+            deposit.amount,
+            "polkadot_assethub",
+            &deposit.tx_hash,
+        ).await.map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+
+        Ok(())
+    }
+}
+
+// keep the old struct name for compatibility but point to new one
+pub type AssetHubListener_Legacy = AssetHubService;
