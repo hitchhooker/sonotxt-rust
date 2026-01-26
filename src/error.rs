@@ -48,6 +48,9 @@ pub enum ApiError {
 
     #[error("Invalid request: {0}")]
     InvalidRequest(String),
+
+    #[error("Storage quota exceeded")]
+    QuotaExceeded,
 }
 
 impl IntoResponse for ApiError {
@@ -75,6 +78,7 @@ impl IntoResponse for ApiError {
             ApiError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, json!({ "error": self.to_string() })),
             ApiError::InvalidRequestError => (StatusCode::BAD_REQUEST, json!({ "error": self.to_string() })),
             ApiError::InvalidRequest(_) => (StatusCode::BAD_REQUEST, json!({ "error": self.to_string() })),
+            ApiError::QuotaExceeded => (StatusCode::INSUFFICIENT_STORAGE, json!({ "error": self.to_string() })),
         };
 
         (status, Json(body)).into_response()

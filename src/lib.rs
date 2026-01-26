@@ -58,6 +58,7 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .nest("/api", routes::sites::routes())
         .nest("/api", routes::billing::routes())
         .nest("/api", routes::payments::routes())
+        .nest("/api", routes::vault::routes())
         .nest("/api/auth", routes::user_auth::routes())
         .merge(routes::auth::routes())
         .merge(routes::admin::routes())
