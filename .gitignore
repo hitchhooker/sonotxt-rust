@@ -2,3 +2,6 @@
 .env
 .env.local
 .env.production
+models/*.onnx
+models/*.bin
+*.wav

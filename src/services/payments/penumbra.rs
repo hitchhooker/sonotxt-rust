@@ -3,10 +3,102 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::{ApiError, AppState, Result};
+use hwpay::listener::penumbra::{PenumbraListener as HwPayListener, PenumbraListenerConfig};
+use hwpay::listener::{Deposit, DepositCallback};
 use hwpay::wallet::penumbra::PenumbraWallet;
+
+/// parse pcli config.toml to extract spend_key
+fn parse_pcli_config(path: &str) -> std::result::Result<String, String> {
+    let content = std::fs::read_to_string(path)
+        .map_err(|e| format!("failed to read pcli config at {}: {}", path, e))?;
+
+    // parse toml
+    let config: toml::Value = toml::from_str(&content)
+        .map_err(|e| format!("failed to parse pcli config: {}", e))?;
+
+    // extract custody.spend_key
+    config.get("custody")
+        .and_then(|c| c.get("spend_key"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| "no custody.spend_key found in pcli config".to_string())
+}
 
 /// default maximum addresses per user if not configured
 const DEFAULT_MAX_ADDRESSES: i64 = 5;
+
+/// callback handler that credits deposits to user accounts
+struct PenumbraDepositHandler {
+    db: PgPool,
+}
+
+#[async_trait::async_trait]
+impl DepositCallback for PenumbraDepositHandler {
+    async fn on_deposit(&self, deposit: Deposit) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // look up account by penumbra_index
+        let account_id: Option<Uuid> = sqlx::query_scalar(
+            r#"
+            SELECT account_id FROM payment_addresses
+            WHERE chain = 'penumbra' AND penumbra_index = $1
+            "#,
+        )
+        .bind(deposit.derivation_index as i64)
+        .fetch_optional(&self.db)
+        .await?;
+
+        let Some(account_id) = account_id else {
+            tracing::warn!(
+                "penumbra deposit for unknown penumbra_index {}: {}",
+                deposit.derivation_index,
+                deposit.tx_hash
+            );
+            return Ok(());
+        };
+
+        // check for duplicate deposit
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM deposits WHERE tx_hash = $1)"
+        )
+        .bind(&deposit.tx_hash)
+        .fetch_one(&self.db)
+        .await?;
+
+        if exists {
+            tracing::debug!("skipping duplicate penumbra deposit: {}", deposit.tx_hash);
+            return Ok(());
+        }
+
+        // record the deposit
+        let deposit_id = Uuid::new_v4();
+        sqlx::query(
+            r#"
+            INSERT INTO deposits (id, account_id, chain, tx_hash, asset, amount, status, confirmations, to_address)
+            VALUES ($1, $2, 'penumbra', $3, 'USDC', $4, 'confirmed', 1, $5)
+            "#,
+        )
+        .bind(deposit_id)
+        .bind(account_id)
+        .bind(&deposit.tx_hash)
+        .bind(deposit.amount)
+        .bind(&deposit.to)
+        .execute(&self.db)
+        .await?;
+
+        // credit the account balance
+        super::credit_deposit(&self.db, deposit_id, account_id, deposit.amount, "penumbra", &deposit.tx_hash)
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) })?;
+
+        tracing::info!(
+            "credited penumbra deposit {} USDC to account {} (tx: {})",
+            deposit.amount,
+            account_id,
+            deposit.tx_hash
+        );
+
+        Ok(())
+    }
+}
 
 pub struct PenumbraListener {
     state: Arc<AppState>,
@@ -111,19 +203,26 @@ impl PenumbraListener {
     }
 
     async fn derive_and_store_address(&self, account_id: Uuid, derivation_index: u32) -> Result<String> {
-        let seed = self
-            .state
-            .config
-            .deposit_wallet_seed
-            .as_ref()
-            .ok_or_else(|| ApiError::Internal("no deposit wallet seed configured".into()))?;
-
-        // create penumbra wallet from seed
-        let seed_bytes = hex::decode(seed.trim_start_matches("0x"))
-            .map_err(|e| ApiError::Internal(format!("invalid hex seed: {}", e)))?;
-
-        let wallet = PenumbraWallet::from_seed(&seed_bytes)
-            .map_err(|e| ApiError::Internal(format!("invalid wallet seed: {}", e)))?;
+        // try to get wallet from spend key (bech32), pcli config, or hex seed
+        let wallet = if let Some(spend_key) = &self.state.config.penumbra_spend_key {
+            // direct bech32 spend key
+            PenumbraWallet::from_spend_key_bech32(spend_key)
+                .map_err(|e| ApiError::Internal(format!("invalid spend key: {}", e)))?
+        } else if let Some(config_path) = &self.state.config.pcli_config_path {
+            // read from pcli config.toml
+            let spend_key = parse_pcli_config(config_path)
+                .map_err(|e| ApiError::Internal(e))?;
+            PenumbraWallet::from_spend_key_bech32(&spend_key)
+                .map_err(|e| ApiError::Internal(format!("invalid spend key from pcli config: {}", e)))?
+        } else if let Some(seed) = &self.state.config.deposit_wallet_seed {
+            // hex seed fallback
+            let seed_bytes = hex::decode(seed.trim_start_matches("0x"))
+                .map_err(|e| ApiError::Internal(format!("invalid hex seed: {}", e)))?;
+            PenumbraWallet::from_seed(&seed_bytes)
+                .map_err(|e| ApiError::Internal(format!("invalid wallet seed: {}", e)))?
+        } else {
+            return Err(ApiError::Internal("no penumbra wallet configured (set PENUMBRA_SPEND_KEY, PCLI_CONFIG_PATH, or DEPOSIT_WALLET_SEED)".into()));
+        };
 
         // derive address using account_id as user identifier
         // returns (address, penumbra_index) - penumbra_index is used to map deposits back to user
@@ -156,7 +255,7 @@ impl PenumbraListener {
     }
 
     /// run the penumbra deposit listener
-    /// connects to pclientd or view service to watch for incoming notes
+    /// connects to pclientd view service to watch for incoming notes
     pub async fn run(&self) -> Result<()> {
         let rpc_url = match &self.state.config.penumbra_rpc {
             Some(url) => url.clone(),
@@ -168,65 +267,41 @@ impl PenumbraListener {
 
         tracing::info!("starting penumbra listener at {}", rpc_url);
 
-        // connect to penumbra view service via grpc
-        // this would use tonic to connect to the view service
-        // and watch for new notes that match our payment addresses
+        // create the hwpay listener with our callback
+        let config = PenumbraListenerConfig {
+            view_service_url: rpc_url,
+        };
+        let handler = PenumbraDepositHandler {
+            db: self.state.db.clone(),
+        };
+        let listener = HwPayListener::new(config).with_callback(handler);
 
-        loop {
-            if let Err(e) = self.poll_deposits().await {
-                tracing::error!("penumbra poll error: {}", e);
-            }
-            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
-        }
-    }
-
-    async fn poll_deposits(&self) -> Result<()> {
-        // in production, this would:
-        // 1. connect to view service
-        // 2. call NotesForVoting or similar to get unspent notes
-        // 3. filter for notes matching our addresses
-        // 4. check if we've already credited them
-        // 5. credit new deposits
-
-        // for now, this is a placeholder
-        // the actual implementation requires penumbra-view crate
-        // which needs the full penumbra dependency tree
-
-        // check for pending deposits to confirm
-        let pending: Vec<(Uuid, Uuid, f64, String)> = sqlx::query_as(
+        // load all active penumbra addresses and register them with the listener
+        let addresses: Vec<(i64, String, i32)> = sqlx::query_as(
             r#"
-            SELECT id, account_id, amount, tx_hash
-            FROM deposits
-            WHERE chain = 'penumbra' AND status = 'pending'
+            SELECT penumbra_index, account_id::text, derivation_index
+            FROM payment_addresses
+            WHERE chain = 'penumbra' AND is_active = true AND penumbra_index IS NOT NULL
             "#,
         )
         .fetch_all(&self.state.db)
         .await
         .map_err(|e| ApiError::Internal(e.to_string()))?;
 
-        for (deposit_id, account_id, amount, tx_hash) in pending {
-            // verify transaction on chain
-            // for now, auto-confirm after some time (placeholder)
-            let created: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
-                "SELECT created_at FROM deposits WHERE id = $1",
-            )
-            .bind(deposit_id)
-            .fetch_one(&self.state.db)
+        let addr_count = addresses.len();
+        for (penumbra_index, account_id, derivation_index) in addresses {
+            listener
+                .watch(penumbra_index as u32, &account_id, derivation_index as u32)
+                .await;
+        }
+
+        tracing::info!("registered {} penumbra addresses for monitoring", addr_count);
+
+        // run the listener (blocks forever)
+        listener
+            .run()
             .await
             .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-            // auto-confirm after 5 minutes (placeholder - real impl checks chain)
-            if chrono::Utc::now() - created > chrono::Duration::minutes(5) {
-                sqlx::query("UPDATE deposits SET status = 'confirmed', confirmations = 1 WHERE id = $1")
-                    .bind(deposit_id)
-                    .execute(&self.state.db)
-                    .await
-                    .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-                super::credit_deposit(&self.state.db, deposit_id, account_id, amount, "penumbra", &tx_hash)
-                    .await?;
-            }
-        }
 
         Ok(())
     }

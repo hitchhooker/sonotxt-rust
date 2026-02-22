@@ -92,7 +92,7 @@ async fn process_next_job(state: &Arc<AppState>, storage: &StorageService) -> Re
             LIMIT 1
             FOR UPDATE SKIP LOCKED
         )
-        RETURNING id, content_id, api_key, text_content, voice, cost, storage_type
+        RETURNING id, content_id, api_key, text_content, voice, cost, storage_type, engine
         "#
     )
     .fetch_optional(&state.db)
@@ -123,13 +123,25 @@ async fn process_next_job(state: &Arc<AppState>, storage: &StorageService) -> Re
     };
 
     let voice = job.voice.as_str();
+    let engine = job.engine.as_deref().unwrap_or("kokoro");
 
     // Determine storage backend (job preference or default)
     let storage_type = job.storage_type.as_deref().unwrap_or(&state.config.default_storage);
     let backend = StorageBackend::from(storage_type);
 
-    // Call Kokoro TTS (outputs opus directly)
-    match generate_tts_kokoro(state, &text, voice).await {
+    // Route to appropriate TTS engine
+    let tts_result = match engine {
+        "vibevoice" | "vibevoice-streaming" => {
+            info!("Using VibeVoice TTS engine: {}", engine);
+            generate_tts_vibevoice(state, &text, voice, engine).await
+        }
+        _ => {
+            info!("Using Kokoro TTS engine (DeepInfra)");
+            generate_tts_kokoro(state, &text, voice).await
+        }
+    };
+
+    match tts_result {
         Ok(result) => {
             // opus from API, wrap in ogg container if needed
             let (audio_data, filename, content_type) = if result.format == "opus" {
@@ -350,6 +362,96 @@ async fn generate_tts_kokoro(state: &AppState, text: &str, voice: &str) -> Resul
         runtime_ms,
         cost,
         request_id: kokoro_response.request_id,
+    })
+}
+
+async fn generate_tts_vibevoice(
+    state: &AppState,
+    text: &str,
+    voice: &str,
+    engine: &str,
+) -> Result<TtsResult> {
+    let vibevoice_url = state
+        .config
+        .vibevoice_url
+        .as_ref()
+        .ok_or_else(|| {
+            error!("VIBEVOICE_URL not configured");
+            crate::error::ApiError::InternalError
+        })?;
+
+    #[derive(serde::Serialize)]
+    struct VibeRequest {
+        text: String,
+        voice: String,
+        speed: f32,
+        output_format: String,
+    }
+
+    #[derive(serde::Deserialize)]
+    struct VibeResponse {
+        audio_base64: String,
+        sample_rate: i32,
+        duration_seconds: f64,
+        format: String,
+    }
+
+    let start = std::time::Instant::now();
+
+    let request = VibeRequest {
+        text: text.to_string(),
+        voice: voice.to_string(),
+        speed: 1.0,
+        output_format: "wav".to_string(),
+    };
+
+    let response = state
+        .http
+        .post(format!("{}/synthesize", vibevoice_url))
+        .header("Content-Type", "application/json")
+        .json(&request)
+        .timeout(std::time::Duration::from_secs(180))
+        .send()
+        .await
+        .map_err(|e| {
+            error!("VibeVoice API request failed: {:?}", e);
+            crate::error::ApiError::ProcessingFailed
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        error!("VibeVoice API error {}: {}", status, body);
+        return Err(crate::error::ApiError::ProcessingFailed);
+    }
+
+    let vibe_response: VibeResponse = response.json().await.map_err(|e| {
+        error!("Failed to parse VibeVoice response: {:?}", e);
+        crate::error::ApiError::ProcessingFailed
+    })?;
+
+    let runtime_ms = start.elapsed().as_millis() as i64;
+
+    // decode hex audio data
+    let audio_data = hex::decode(&vibe_response.audio_base64).map_err(|e| {
+        error!("Failed to decode audio hex: {:?}", e);
+        crate::error::ApiError::ProcessingFailed
+    })?;
+
+    info!(
+        "VibeVoice synthesis completed: {:.1}s audio, {} bytes, {}ms runtime",
+        vibe_response.duration_seconds,
+        audio_data.len(),
+        runtime_ms
+    );
+
+    Ok(TtsResult {
+        audio_data,
+        format: vibe_response.format,
+        duration_seconds: vibe_response.duration_seconds,
+        runtime_ms: Some(runtime_ms),
+        cost: None, // self-hosted, no external cost
+        request_id: None,
     })
 }
 

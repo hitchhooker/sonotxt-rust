@@ -263,8 +263,14 @@ impl AssetHubListener {
         Ok(())
     }
 
-    /// run the deposit listener (background task)
+    /// run the deposit listener (background task) with default handler
     pub async fn run(&mut self) -> Result<()> {
+        let handler = DepositHandler::new(self.state.db.clone());
+        self.run_with_handler(handler).await
+    }
+
+    /// run the deposit listener with custom handler (for auto-sweep)
+    pub async fn run_with_handler<H: hwpay::DepositCallback + Send + 'static>(&mut self, handler: H) -> Result<()> {
         tracing::info!("starting assethub listener at {}", self.state.config.assethub_rpc);
 
         // connect to the network
@@ -274,13 +280,8 @@ impl AssetHubListener {
         // load watched addresses
         self.load_watched_addresses().await?;
 
-        // create callback that records deposits
-        let callback = DepositHandler {
-            db: self.state.db.clone(),
-        };
-
         // run the listener
-        self.hwpay_listener.run(callback).await
+        self.hwpay_listener.run(handler).await
             .map_err(|e| ApiError::Internal(format!("listener error: {}", e)))?;
 
         Ok(())
@@ -297,9 +298,47 @@ impl AssetHubListener {
     }
 }
 
-/// callback handler for hwpay deposits
-struct DepositHandler {
+/// callback handler for hwpay deposits with auto-sweep
+pub struct DepositHandler {
     db: PgPool,
+    sweeper: Option<hwpay::Sweeper>,
+    wallet: Option<hwpay::PolkadotWallet>,
+    sweep_destination: Option<String>,
+    usdc_asset_id: u32,
+    usdt_asset_id: u32,
+}
+
+impl DepositHandler {
+    /// create handler without sweep (just credits)
+    pub fn new(db: PgPool) -> Self {
+        Self {
+            db,
+            sweeper: None,
+            wallet: None,
+            sweep_destination: None,
+            usdc_asset_id: 1337,
+            usdt_asset_id: 1984,
+        }
+    }
+
+    /// create handler with auto-sweep to medium wallet
+    pub fn with_sweep(
+        db: PgPool,
+        sweeper: hwpay::Sweeper,
+        wallet: hwpay::PolkadotWallet,
+        sweep_destination: String,
+        usdc_asset_id: u32,
+        usdt_asset_id: u32,
+    ) -> Self {
+        Self {
+            db,
+            sweeper: Some(sweeper),
+            wallet: Some(wallet),
+            sweep_destination: Some(sweep_destination),
+            usdc_asset_id,
+            usdt_asset_id,
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -358,6 +397,52 @@ impl hwpay::DepositCallback for DepositHandler {
             "polkadot_assethub",
             &deposit.tx_hash,
         ).await.map_err(|e| Box::new(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())))?;
+
+        // auto-sweep to medium wallet if configured
+        if let (Some(sweeper), Some(wallet), Some(dest)) = (&self.sweeper, &self.wallet, &self.sweep_destination) {
+            let asset_id = match deposit.asset {
+                hwpay::Asset::Usdc => self.usdc_asset_id,
+                hwpay::Asset::Usdt => self.usdt_asset_id,
+                hwpay::Asset::Dot => {
+                    tracing::debug!("skipping sweep for native DOT");
+                    return Ok(());
+                }
+            };
+
+            // convert amount back to smallest unit (6 decimals for USDC/USDT)
+            let amount_raw = (deposit.amount * 1_000_000.0) as u128;
+
+            let sweep_config = hwpay::SweepConfig {
+                min_amount: 100_000, // 0.1 USDC minimum
+                asset_id,
+                keep_for_fees: 0,
+                destination: dest.clone(),
+            };
+
+            match sweeper.sweep_assets(
+                wallet,
+                &deposit.user_id,
+                deposit.derivation_index,
+                &sweep_config,
+                amount_raw,
+            ).await {
+                Ok(result) if result.success => {
+                    tracing::info!(
+                        "swept {} to medium wallet: {:?}",
+                        deposit.amount,
+                        result.tx_hash
+                    );
+                }
+                Ok(result) => {
+                    tracing::debug!("sweep skipped: {:?}", result.reason);
+                }
+                Err(e) => {
+                    tracing::warn!("sweep failed (will retry): {}", e);
+                    // don't fail the deposit - funds are still credited
+                    // sweep can be retried later
+                }
+            }
+        }
 
         Ok(())
     }

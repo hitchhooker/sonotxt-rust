@@ -3,6 +3,7 @@ pub mod billing;
 pub mod content;
 pub mod crawler;
 pub mod crypto;
+pub mod kokoro;
 pub mod magic_link;
 pub mod payments;
 pub mod seed_manager;

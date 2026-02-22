@@ -4,12 +4,20 @@ use uuid::Uuid;
 use chrono::{Utc, Duration};
 use serde::{Deserialize, Serialize};
 
+// deepinfra kokoro base: $0.80/M chars = $0.0000008/char
+pub const DEEPINFRA_BASE: f64 = 0.0000008;
+// markup multipliers over deepinfra cost
+pub const US_MARKUP: f64 = 2.0;       // $1.60/M chars
+pub const UK_MARKUP: f64 = 2.7;       // $2.16/M (2x * 1.35 gbp/usd)
+// subscriber discount (40% off)
+pub const SUBSCRIBER_DISCOUNT: f64 = 0.4;
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TtsRequest {
-    pub minutes: f64,
+    pub chars: usize,
+    pub voice: String,
     pub remove_watermark: bool,
     pub priority: bool,
-    pub custom_voice: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -17,6 +25,11 @@ pub struct PricingEstimate {
     pub cost: f64,
     pub watermark: bool,
     pub subscriber_discount: f64,
+}
+
+// british voices (bf_* and bm_*) get higher markup
+fn is_british_voice(voice: &str) -> bool {
+    voice.starts_with("bf_") || voice.starts_with("bm_")
 }
 
 pub async fn estimate_cost(
@@ -35,37 +48,42 @@ pub async fn estimate_cost(
     .fetch_optional(&state.db)
     .await.map_err(|_| ApiError::InternalError)?
     .ok_or(ApiError::NotFound)?;
-    
-    let is_active_subscriber = account.subscription_type.is_some() && 
+
+    let is_active_subscriber = account.subscription_type.is_some() &&
         account.subscription_expires.map_or(false, |exp| exp > Utc::now());
-    
-    let base_rate = if is_active_subscriber { 0.06 } else { 0.10 };
-    let mut cost = request.minutes * base_rate;
-    
+
+    // cost = deepinfra_base * markup
+    let markup = if is_british_voice(&request.voice) {
+        UK_MARKUP   // 2.7x = $2.16/M (2x * gbp/usd)
+    } else {
+        US_MARKUP   // 2.0x = $1.60/M
+    };
+    let mut cost = request.chars as f64 * DEEPINFRA_BASE * markup;
+
+    // subscriber discount (40% off)
+    let subscriber_discount = if is_active_subscriber {
+        let discount = cost * SUBSCRIBER_DISCOUNT;
+        cost -= discount;
+        discount
+    } else {
+        0.0
+    };
+
     let watermark = if is_active_subscriber || account.watermark_free {
         false
     } else if request.remove_watermark {
-        cost += request.minutes * 0.03;
+        // watermark removal: +25%
+        cost *= 1.25;
         false
     } else {
         true
     };
-    
+
     if request.priority && !is_active_subscriber {
-        cost += request.minutes * 0.02;
+        // priority: +20%
+        cost *= 1.20;
     }
-    
-    if request.custom_voice.is_some() {
-        let voice_rate = if is_active_subscriber { 0.02 } else { 0.05 };
-        cost += request.minutes * voice_rate;
-    }
-    
-    let subscriber_discount = if is_active_subscriber {
-        request.minutes * (0.10 - 0.06) // Show savings
-    } else {
-        0.0
-    };
-    
+
     Ok(PricingEstimate {
         cost,
         watermark,
@@ -80,7 +98,7 @@ pub async fn charge_for_tts(
     content_id: Uuid,
 ) -> Result<PricingEstimate> {
     let estimate = estimate_cost(state, account_id, request).await.map_err(|_| ApiError::InternalError)?;
-    
+
     // Check balance
     let balance = sqlx::query_scalar!(
         "SELECT balance FROM account_credits WHERE account_id = $1",
@@ -88,14 +106,14 @@ pub async fn charge_for_tts(
     )
     .fetch_one(&state.db)
     .await.map_err(|_| ApiError::InternalError)?;
-    
+
     if balance < estimate.cost {
         return Err(ApiError::InsufficientBalance);
     }
-    
+
     // Start transaction
     let mut tx = state.db.begin().await.map_err(|_| ApiError::InternalError)?;
-    
+
     // Deduct credits
     sqlx::query!(
         r#"
@@ -108,7 +126,7 @@ pub async fn charge_for_tts(
     )
     .execute(&mut *tx)
     .await.map_err(|_| ApiError::InternalError)?;
-    
+
     // Log transaction
     sqlx::query!(
         r#"
@@ -117,13 +135,13 @@ pub async fn charge_for_tts(
         "#,
         account_id,
         -estimate.cost,
-        format!("TTS: {:.1} minutes for content {}", request.minutes, content_id)
+        format!("TTS: {} chars ({}) for {}", request.chars, request.voice, content_id)
     )
     .execute(&mut *tx)
     .await.map_err(|_| ApiError::InternalError)?;
-    
+
     tx.commit().await.map_err(|_| ApiError::InternalError)?;
-    
+
     Ok(estimate)
 }
 

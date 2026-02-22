@@ -25,6 +25,12 @@ struct TtsRequest {
     voice: String,
     #[serde(default)]
     storage: Option<String>, // "minio" or "ipfs"
+    #[serde(default = "default_engine")]
+    engine: String, // "kokoro" | "vibevoice" | "vibevoice-streaming"
+}
+
+fn default_engine() -> String {
+    "kokoro".to_string()
 }
 
 fn default_voice() -> String {
@@ -214,6 +220,12 @@ async fn tts(
         default_voice()
     };
 
+    // validate engine
+    let engine = match req.engine.as_str() {
+        "kokoro" | "vibevoice" | "vibevoice-streaming" => req.engine.clone(),
+        _ => default_engine(),
+    };
+
     let job_id = Uuid::new_v4().to_string();
     let char_count = text.len() as i32;
 
@@ -252,7 +264,7 @@ async fn tts(
             let storage_type = req.storage.as_deref();
 
             sqlx::query!(
-                "INSERT INTO jobs (id, api_key, text_content, voice, status, cost, is_free_tier, char_count, estimated_duration_ms, storage_type) VALUES ($1, $2, $3, $4, 'queued', $5, FALSE, $6, $7, $8)",
+                "INSERT INTO jobs (id, api_key, text_content, voice, status, cost, is_free_tier, char_count, estimated_duration_ms, storage_type, engine) VALUES ($1, $2, $3, $4, 'queued', $5, FALSE, $6, $7, $8, $9)",
                 job_id,
                 auth_user.api_key,
                 text,
@@ -260,7 +272,8 @@ async fn tts(
                 estimated_cost,
                 char_count,
                 estimated_duration_ms,
-                storage_type
+                storage_type,
+                engine
             )
             .execute(&mut *tx)
             .await?;
@@ -293,18 +306,21 @@ async fn tts(
 
             let estimated_duration_ms = (char_count as f64 * crate::models::MS_PER_CHAR) as i32;
             // free tier only gets minio, not ipfs (to avoid pinning costs)
+            // free tier only gets kokoro (vibevoice requires more compute)
             let storage_type: Option<&str> = Some("minio");
+            let engine_type = "kokoro";
 
             // create job with ip_hash instead of api_key
             sqlx::query!(
-                "INSERT INTO jobs (id, ip_hash, text_content, voice, status, cost, is_free_tier, char_count, estimated_duration_ms, storage_type) VALUES ($1, $2, $3, $4, 'queued', 0, TRUE, $5, $6, $7)",
+                "INSERT INTO jobs (id, ip_hash, text_content, voice, status, cost, is_free_tier, char_count, estimated_duration_ms, storage_type, engine) VALUES ($1, $2, $3, $4, 'queued', 0, TRUE, $5, $6, $7, $8)",
                 job_id,
                 ip_hash,
                 text,
                 voice,
                 char_count,
                 estimated_duration_ms,
-                storage_type
+                storage_type,
+                engine_type
             )
             .execute(&mut *tx)
             .await?;

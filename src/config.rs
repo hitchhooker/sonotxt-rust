@@ -16,7 +16,8 @@ pub struct Config {
     #[arg(long, env = "RUST_LOG", default_value = "info")]
     pub log_level: String,
 
-    #[arg(long, env = "COST_PER_CHAR", default_value = "0.00001")]
+    // 2x deepinfra kokoro: $1.60/M chars = $0.0000016/char
+    #[arg(long, env = "COST_PER_CHAR", default_value = "0.0000016")]
     pub cost_per_char: f64,
 
     #[arg(long, env = "MAX_CONTENT_SIZE", default_value = "50000")]
@@ -100,6 +101,12 @@ pub struct Config {
     #[arg(long, env = "ASSETHUB_USDT_ASSET_ID", default_value = "1984")]
     pub assethub_usdt_asset_id: u32,
 
+    #[arg(long, env = "ASSETHUB_LISTENER_ENABLED", default_value = "false")]
+    pub assethub_listener_enabled: bool,
+
+    #[arg(long, env = "ASSETHUB_MEDIUM_WALLET")]
+    pub assethub_medium_wallet: Option<String>,
+
     // penumbra
     #[arg(long, env = "PENUMBRA_RPC")]
     pub penumbra_rpc: Option<String>,
@@ -107,6 +114,14 @@ pub struct Config {
     // deposit wallet seed (for generating per-user addresses)
     #[arg(long, env = "DEPOSIT_WALLET_SEED")]
     pub deposit_wallet_seed: Option<String>,
+
+    // penumbra spend key (bech32 format, penumbraspendkey1...)
+    #[arg(long, env = "PENUMBRA_SPEND_KEY")]
+    pub penumbra_spend_key: Option<String>,
+
+    // path to pcli config.toml (reads spend_key from it)
+    #[arg(long, env = "PCLI_CONFIG_PATH")]
+    pub pcli_config_path: Option<String>,
 
     // ipfs storage
     #[arg(long, env = "IPFS_API_URL", default_value = "http://127.0.0.1:5001")]
@@ -137,6 +152,10 @@ pub struct Config {
     // embed daily char limit per domain
     #[arg(long, env = "EMBED_DAILY_LIMIT", default_value = "50000")]
     pub embed_daily_limit: i32,
+
+    // vibevoice tts service url (python service on bkk07)
+    #[arg(long, env = "VIBEVOICE_URL")]
+    pub vibevoice_url: Option<String>,
 }
 
 impl Config {
