@@ -44,9 +44,13 @@ argon2 = "0.5"
 getrandom = "0.2"
 
 # hardware-secured payment processor
-hwpay = { path = "../../hwpay", features = ["penumbra"] }
+hwpay = { path = "../hwpay", features = ["penumbra"] }
 secrecy = "0.10"
 async-trait = "0.1"
+toml = "0.8"
+
+# local tts inference
+kokoro-tts = "0.3"
 
 [dev-dependencies]
 tempfile = "3"
