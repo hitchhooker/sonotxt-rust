@@ -48,6 +48,7 @@ struct TtsResponse {
 }
 
 const VALID_VOICES: &[&str] = &[
+    // kokoro voices
     "af_alloy", "af_aoede", "af_bella", "af_heart", "af_jessica", "af_kore",
     "af_nicole", "af_nova", "af_river", "af_sarah", "af_sky",
     "am_adam", "am_echo", "am_eric", "am_fenrir", "am_liam", "am_michael",
@@ -61,6 +62,9 @@ const VALID_VOICES: &[&str] = &[
     "pf_dora", "pm_alex", "pm_santa",
     "zf_xiaobei", "zf_xiaoni", "zf_xiaoxiao", "zf_xiaoyi",
     "zm_yunjian", "zm_yunxi", "zm_yunxia", "zm_yunyang",
+    // vibevoice voices
+    "en-Carter_man", "en-Davis_man", "en-Emma_woman",
+    "en-Frank_man", "en-Grace_woman", "en-Mike_man",
 ];
 
 pub fn routes() -> Router<Arc<AppState>> {
@@ -97,7 +101,8 @@ async fn list_voices(State(state): State<Arc<AppState>>) -> Json<serde_json::Val
             "british_female": ["bf_alice", "bf_emma", "bf_isabella", "bf_lily"],
             "british_male": ["bm_daniel", "bm_fable", "bm_george", "bm_lewis"],
             "japanese": ["jf_alpha", "jf_gongitsune", "jf_nezumi", "jf_tebukuro", "jm_kumo"],
-            "chinese": ["zf_xiaobei", "zf_xiaoni", "zf_xiaoxiao", "zf_xiaoyi", "zm_yunjian", "zm_yunxi", "zm_yunxia", "zm_yunyang"]
+            "chinese": ["zf_xiaobei", "zf_xiaoni", "zf_xiaoxiao", "zf_xiaoyi", "zm_yunjian", "zm_yunxi", "zm_yunxia", "zm_yunyang"],
+            "vibevoice_english": ["en-Carter_man", "en-Davis_man", "en-Emma_woman", "en-Frank_man", "en-Grace_woman", "en-Mike_man"]
         }
     }))
 }
@@ -306,9 +311,12 @@ async fn tts(
 
             let estimated_duration_ms = (char_count as f64 * crate::models::MS_PER_CHAR) as i32;
             // free tier only gets minio, not ipfs (to avoid pinning costs)
-            // free tier only gets kokoro (vibevoice requires more compute)
             let storage_type: Option<&str> = Some("minio");
-            let engine_type = "kokoro";
+            let engine_type = if voice.starts_with("en-") {
+                "vibevoice-streaming"
+            } else {
+                "kokoro"
+            };
 
             // create job with ip_hash instead of api_key
             sqlx::query!(

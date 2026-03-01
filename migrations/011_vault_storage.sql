@@ -2,7 +2,7 @@
 -- Server stores encrypted blobs it cannot decrypt
 -- Client encrypts with PRF-derived key before upload
 
-CREATE TABLE vault_items (
+CREATE TABLE IF NOT EXISTS vault_items (
     id TEXT PRIMARY KEY,
     account_id UUID NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
     filename TEXT NOT NULL,
@@ -16,8 +16,8 @@ CREATE TABLE vault_items (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX idx_vault_items_account ON vault_items(account_id);
-CREATE INDEX idx_vault_items_public ON vault_items(is_public) WHERE is_public = TRUE;
+CREATE INDEX IF NOT EXISTS idx_vault_items_account ON vault_items(account_id);
+CREATE INDEX IF NOT EXISTS idx_vault_items_public ON vault_items(is_public) WHERE is_public = TRUE;
 
 -- Trigger to update updated_at
 CREATE OR REPLACE FUNCTION update_vault_items_updated_at()
@@ -28,6 +28,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+DROP TRIGGER IF EXISTS vault_items_updated_at ON vault_items;
 CREATE TRIGGER vault_items_updated_at
     BEFORE UPDATE ON vault_items
     FOR EACH ROW
