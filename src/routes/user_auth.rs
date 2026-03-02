@@ -24,6 +24,9 @@ pub fn routes() -> Router<Arc<AppState>> {
         // direct public key auth (no nickname required)
         .route("/pubkey/challenge", post(get_pubkey_challenge))
         .route("/pubkey/verify", post(verify_pubkey))
+        // polkadot wallet auth
+        .route("/wallet/challenge", post(wallet_challenge))
+        .route("/wallet/verify", post(wallet_verify))
         // magic link auth
         .route("/magic-link/request", post(request_magic_link))
         .route("/magic-link/verify", post(verify_magic_link))
@@ -73,6 +76,8 @@ pub struct AuthResponse {
     user_id: String,
     nickname: Option<String>,
     email: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wallet_address: Option<String>,
     balance: f64,
     token: Option<String>,
 }
@@ -102,6 +107,7 @@ pub async fn register(
                 user_id: user.id.to_string(),
                 nickname: user.nickname,
                 email: user.email,
+                wallet_address: None,
                 balance: user.balance,
                 token: None, // User needs to login after registration
             }))
@@ -173,6 +179,7 @@ pub async fn verify(
                 user_id: user.id.to_string(),
                 nickname: user.nickname,
                 email: user.email,
+                wallet_address: None,
                 balance: user.balance,
                 token: Some(token),
             }))
@@ -242,6 +249,7 @@ pub async fn verify_pubkey(
                 user_id: user.id.to_string(),
                 nickname: user.nickname,
                 email: user.email,
+                wallet_address: None,
                 balance: user.balance,
                 token: Some(token),
             }))
@@ -303,9 +311,77 @@ pub async fn verify_magic_link(
         user_id: user.id.to_string(),
         nickname: None,
         email: user.email,
+        wallet_address: None,
         balance: user.balance,
         token: Some(token),
     }))
+}
+
+// ============================================================================
+// Polkadot wallet auth endpoints
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct WalletChallengeRequest {
+    address: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WalletChallengeResponse {
+    challenge: String,
+}
+
+/// Get a challenge to sign with wallet
+pub async fn wallet_challenge(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<WalletChallengeRequest>,
+) -> Result<Json<WalletChallengeResponse>> {
+    let mut redis = state.redis.clone();
+    user_auth::check_rate_limit(&mut redis, "wallet_challenge", &req.address).await?;
+
+    let challenge = user_auth::get_wallet_challenge(&state.db, &req.address).await?;
+
+    Ok(Json(WalletChallengeResponse { challenge }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WalletVerifyRequest {
+    address: String,
+    challenge: String,
+    signature: String,
+}
+
+/// Verify wallet signature and create session
+pub async fn wallet_verify(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<WalletVerifyRequest>,
+) -> Result<Json<AuthResponse>> {
+    let mut redis = state.redis.clone();
+    user_auth::check_rate_limit(&mut redis, "wallet_login", &req.address).await?;
+
+    let result = user_auth::verify_wallet_login(
+        &state.db,
+        &req.address,
+        &req.challenge,
+        &req.signature,
+    )
+    .await;
+
+    match result {
+        Ok((user, token)) => {
+            user_auth::clear_rate_limit(&mut redis, "wallet_login", &req.address).await;
+
+            Ok(Json(AuthResponse {
+                user_id: user.id.to_string(),
+                nickname: user.nickname,
+                email: user.email,
+                wallet_address: Some(req.address.clone()),
+                balance: user.balance,
+                token: Some(token),
+            }))
+        }
+        Err(e) => Err(e),
+    }
 }
 
 // ============================================================================
@@ -322,6 +398,8 @@ pub struct UserResponse {
     user_id: String,
     nickname: Option<String>,
     email: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    wallet_address: Option<String>,
     balance: f64,
 }
 
@@ -336,6 +414,7 @@ pub async fn get_session(
         user_id: user.id.to_string(),
         nickname: user.nickname,
         email: user.email,
+        wallet_address: user.wallet_address,
         balance: user.balance,
     }))
 }

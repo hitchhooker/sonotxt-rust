@@ -88,7 +88,7 @@ async fn process_next_job(state: &Arc<AppState>, storage: &StorageService) -> Re
         WHERE id = (
             SELECT id FROM jobs
             WHERE status = 'queued'
-            ORDER BY created_at
+            ORDER BY priority DESC, created_at ASC
             LIMIT 1
             FOR UPDATE SKIP LOCKED
         )

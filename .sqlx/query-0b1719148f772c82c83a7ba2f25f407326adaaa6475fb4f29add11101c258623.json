@@ -1,0 +1,62 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE jobs\n        SET status = 'processing', started_at = NOW()\n        WHERE id = (\n            SELECT id FROM jobs\n            WHERE status = 'queued'\n            ORDER BY priority DESC, created_at ASC\n            LIMIT 1\n            FOR UPDATE SKIP LOCKED\n        )\n        RETURNING id, content_id, api_key, text_content, voice, cost, storage_type, engine\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "content_id",
+        "type_info": "Uuid"
+      },
+      {
+        "ordinal": 2,
+        "name": "api_key",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "text_content",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "voice",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "cost",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 6,
+        "name": "storage_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "engine",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      true,
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "0b1719148f772c82c83a7ba2f25f407326adaaa6475fb4f29add11101c258623"
+}

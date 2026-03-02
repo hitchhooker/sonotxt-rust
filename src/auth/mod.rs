@@ -2,4 +2,4 @@ pub mod api_key;
 pub mod free_tier;
 
 pub use api_key::AuthenticatedUser;
-pub use free_tier::{TtsUser, check_free_tier_limit};
+pub use free_tier::{TtsUser, check_free_tier_limit, get_free_tier_remaining, FREE_TIER_DAILY_LIMIT, FREE_TIER_LOGGED_IN_LIMIT};

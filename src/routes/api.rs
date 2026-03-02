@@ -11,7 +11,7 @@ use std::{collections::HashMap, sync::Arc};
 use uuid::Uuid;
 
 use crate::{
-    auth::{AuthenticatedUser, TtsUser, check_free_tier_limit},
+    auth::{AuthenticatedUser, TtsUser, check_free_tier_limit, get_free_tier_remaining, FREE_TIER_DAILY_LIMIT, FREE_TIER_LOGGED_IN_LIMIT},
     error::Result,
     models::{JobStatus, ProcessRequest, ProcessResponse},
     services::content::extract_content,
@@ -75,6 +75,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/status", get(status))
         .route("/voices", get(list_voices))
         .route("/download/{job_id}", get(download_audio))
+        .route("/free-balance", get(free_balance))
 }
 
 async fn list_voices(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
@@ -250,6 +251,13 @@ async fn tts(
                 return Err(crate::error::ApiError::InsufficientBalance);
             }
 
+            // priority: paid users 10-100 based on balance, $0 balance = 1
+            let priority: i32 = if balance > 0.0 {
+                10 + ((balance * 100.0).floor() as i32).min(90)
+            } else {
+                1
+            };
+
             let mut tx = state.db.begin().await?;
 
             let rows_affected = sqlx::query!(
@@ -269,7 +277,7 @@ async fn tts(
             let storage_type = req.storage.as_deref();
 
             sqlx::query!(
-                "INSERT INTO jobs (id, api_key, text_content, voice, status, cost, is_free_tier, char_count, estimated_duration_ms, storage_type, engine) VALUES ($1, $2, $3, $4, 'queued', $5, FALSE, $6, $7, $8, $9)",
+                "INSERT INTO jobs (id, api_key, text_content, voice, status, cost, is_free_tier, char_count, estimated_duration_ms, storage_type, engine, priority) VALUES ($1, $2, $3, $4, 'queued', $5, FALSE, $6, $7, $8, $9, $10)",
                 job_id,
                 auth_user.api_key,
                 text,
@@ -278,7 +286,8 @@ async fn tts(
                 char_count,
                 estimated_duration_ms,
                 storage_type,
-                engine
+                engine,
+                priority
             )
             .execute(&mut *tx)
             .await?;
@@ -318,9 +327,9 @@ async fn tts(
                 "kokoro"
             };
 
-            // create job with ip_hash instead of api_key
+            // create job with ip_hash instead of api_key, priority 0 (free tier)
             sqlx::query!(
-                "INSERT INTO jobs (id, ip_hash, text_content, voice, status, cost, is_free_tier, char_count, estimated_duration_ms, storage_type, engine) VALUES ($1, $2, $3, $4, 'queued', 0, TRUE, $5, $6, $7, $8)",
+                "INSERT INTO jobs (id, ip_hash, text_content, voice, status, cost, is_free_tier, char_count, estimated_duration_ms, storage_type, engine, priority) VALUES ($1, $2, $3, $4, 'queued', 0, TRUE, $5, $6, $7, $8, 0)",
                 job_id,
                 ip_hash,
                 text,
@@ -427,6 +436,32 @@ async fn status(
         }
         _ => Ok(Json(JobStatus::Queued { position: None, estimated_seconds })),
     }
+}
+
+#[derive(Debug, Serialize)]
+struct FreeBalanceResponse {
+    remaining: i32,
+    limit: i32,
+}
+
+async fn free_balance(
+    State(state): State<Arc<AppState>>,
+    user: TtsUser,
+) -> Result<Json<FreeBalanceResponse>> {
+    let (ip_hash, limit) = match &user {
+        TtsUser::Authenticated(_) => {
+            // authenticated users get higher free tier limit
+            // they don't carry ip_hash, so return full limit
+            return Ok(Json(FreeBalanceResponse {
+                remaining: FREE_TIER_LOGGED_IN_LIMIT,
+                limit: FREE_TIER_LOGGED_IN_LIMIT,
+            }));
+        }
+        TtsUser::FreeTier { ip_hash } => (ip_hash.clone(), FREE_TIER_DAILY_LIMIT),
+    };
+
+    let (remaining, limit) = get_free_tier_remaining(&state.db, &ip_hash, limit).await?;
+    Ok(Json(FreeBalanceResponse { remaining, limit }))
 }
 
 async fn download_audio(

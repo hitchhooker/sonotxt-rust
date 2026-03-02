@@ -14,7 +14,8 @@ use std::net::IpAddr;
 use crate::{error::ApiError, AppState};
 use super::api_key::AuthenticatedUser;
 
-const FREE_TIER_DAILY_LIMIT: i32 = 1000;
+pub const FREE_TIER_DAILY_LIMIT: i32 = 1000;
+pub const FREE_TIER_LOGGED_IN_LIMIT: i32 = 3000;
 const IP_HASH_SALT: &[u8] = b"sonotxt-ip-hash-salt-v1";
 
 #[derive(Debug, Clone)]
@@ -199,4 +200,32 @@ pub async fn consume_free_tier(
     .map_err(|_| ApiError::InternalError)?;
 
     Ok(())
+}
+
+/// Returns (remaining, limit) without consuming any chars.
+pub async fn get_free_tier_remaining(
+    db: &sqlx::PgPool,
+    ip_hash: &str,
+    limit: i32,
+) -> Result<(i32, i32), ApiError> {
+    let row = sqlx::query!(
+        r#"
+        INSERT INTO free_tier_usage (ip_hash, chars_used, last_reset)
+        VALUES ($1, 0, CURRENT_DATE)
+        ON CONFLICT (ip_hash) DO UPDATE
+        SET chars_used = CASE
+            WHEN free_tier_usage.last_reset < CURRENT_DATE THEN 0
+            ELSE free_tier_usage.chars_used
+        END,
+        last_reset = CURRENT_DATE
+        RETURNING chars_used
+        "#,
+        ip_hash
+    )
+    .fetch_one(db)
+    .await
+    .map_err(|_| ApiError::InternalError)?;
+
+    let remaining = (limit - row.chars_used).max(0);
+    Ok((remaining, limit))
 }

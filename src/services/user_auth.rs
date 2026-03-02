@@ -67,6 +67,7 @@ pub struct User {
     pub nickname: Option<String>,
     pub email: Option<String>,
     pub public_key: Option<String>,
+    pub wallet_address: Option<String>,
     pub balance: f64,
 }
 
@@ -265,6 +266,7 @@ pub async fn register_with_pubkey(
         nickname: user.1,
         email: user.2,
         public_key: user.3,
+        wallet_address: None,
         balance: user.4,
     })
 }
@@ -295,6 +297,7 @@ pub async fn register_with_pubkey_only(
             nickname,
             email,
             public_key: pk,
+            wallet_address: None,
             balance,
         });
     }
@@ -319,6 +322,7 @@ pub async fn register_with_pubkey_only(
         nickname: user.1,
         email: user.2,
         public_key: user.3,
+        wallet_address: None,
         balance: user.4,
     })
 }
@@ -444,6 +448,7 @@ async fn get_or_create_user_by_pubkey(db: &PgPool, public_key: &str) -> Result<U
             nickname,
             email,
             public_key: pk,
+            wallet_address: None,
             balance,
         });
     }
@@ -467,6 +472,7 @@ async fn get_or_create_user_by_pubkey(db: &PgPool, public_key: &str) -> Result<U
         nickname: user.1,
         email: user.2,
         public_key: user.3,
+        wallet_address: None,
         balance: user.4,
     })
 }
@@ -607,6 +613,7 @@ pub async fn verify_and_login(
             nickname,
             email,
             public_key: Some(pubkey),
+            wallet_address: None,
             balance,
         },
         token,
@@ -617,9 +624,9 @@ pub async fn verify_and_login(
 pub async fn validate_session(db: &PgPool, token: &str) -> Result<User> {
     let token_hash = hash_token(token);
 
-    let row: Option<(Uuid, Option<String>, Option<String>, Option<String>, f64)> = sqlx::query_as(
+    let row: Option<(Uuid, Option<String>, Option<String>, Option<String>, Option<String>, f64)> = sqlx::query_as(
         r#"
-        SELECT u.id, u.nickname, u.email, u.public_key, u.balance::float8
+        SELECT u.id, u.nickname, u.email, u.public_key, u.wallet_address, u.balance::float8
         FROM sessions s
         JOIN users u ON s.user_id = u.id
         WHERE s.token_hash = $1 AND s.expires_at > NOW()
@@ -638,7 +645,8 @@ pub async fn validate_session(db: &PgPool, token: &str) -> Result<User> {
         nickname: user.1,
         email: user.2,
         public_key: user.3,
-        balance: user.4,
+        wallet_address: user.4,
+        balance: user.5,
     })
 }
 
@@ -650,6 +658,200 @@ pub async fn logout(db: &PgPool, token: &str) -> Result<()> {
         .execute(db)
         .await?;
     Ok(())
+}
+
+// ============================================================================
+// Polkadot wallet auth (sr25519 + ss58)
+// ============================================================================
+
+/// Decode SS58 address to raw 32-byte public key
+pub fn decode_ss58(address: &str) -> std::result::Result<[u8; 32], String> {
+    let data = bs58::decode(address)
+        .into_vec()
+        .map_err(|e| format!("invalid base58: {}", e))?;
+
+    if data.len() < 35 {
+        return Err("address too short".into());
+    }
+
+    let prefix_len = if data[0] < 64 { 1 } else { 2 };
+
+    if data.len() != prefix_len + 32 + 2 {
+        return Err(format!("invalid address length: {}", data.len()));
+    }
+
+    let pubkey: [u8; 32] = data[prefix_len..prefix_len + 32]
+        .try_into()
+        .map_err(|_| "invalid pubkey bytes")?;
+
+    // verify checksum
+    let mut hasher = blake2b_simd::Params::new().hash_length(64).to_state();
+    hasher.update(b"SS58PRE");
+    hasher.update(&data[..prefix_len + 32]);
+    let checksum = hasher.finalize();
+
+    if checksum.as_bytes()[..2] != data[prefix_len + 32..] {
+        return Err("invalid checksum".into());
+    }
+
+    Ok(pubkey)
+}
+
+/// Verify sr25519 signature from polkadot wallet signRaw
+/// signRaw wraps the message as <Bytes>{msg}</Bytes>
+pub fn verify_sr25519(pubkey: &[u8; 32], message: &[u8], signature_hex: &str) -> bool {
+    let Ok(sig_bytes) = hex::decode(signature_hex.strip_prefix("0x").unwrap_or(signature_hex))
+    else {
+        return false;
+    };
+    let Ok(sig_array): std::result::Result<[u8; 64], _> = sig_bytes.try_into() else {
+        return false;
+    };
+
+    let Ok(public) = schnorrkel::PublicKey::from_bytes(pubkey) else {
+        return false;
+    };
+    let Ok(signature) = schnorrkel::Signature::from_bytes(&sig_array) else {
+        return false;
+    };
+
+    let ctx = schnorrkel::signing_context(b"substrate");
+    public.verify(ctx.bytes(message), &signature).is_ok()
+}
+
+/// Get or create user by wallet address
+pub async fn get_or_create_wallet_user(db: &PgPool, address: &str) -> Result<User> {
+    // try existing
+    let existing: Option<(Uuid, Option<String>, Option<String>, Option<String>, f64)> =
+        sqlx::query_as(
+            "SELECT id, nickname, email, public_key, balance::float8 FROM users WHERE wallet_address = $1",
+        )
+        .bind(address)
+        .fetch_optional(db)
+        .await?;
+
+    if let Some((id, nickname, email, pk, balance)) = existing {
+        return Ok(User {
+            id,
+            nickname,
+            email,
+            public_key: pk,
+            wallet_address: None,
+            balance,
+        });
+    }
+
+    // create new wallet user
+    let user: (Uuid, Option<String>, Option<String>, Option<String>, f64) = sqlx::query_as(
+        r#"
+        INSERT INTO users (wallet_address)
+        VALUES ($1)
+        RETURNING id, nickname, email, public_key, balance::float8
+        "#,
+    )
+    .bind(address)
+    .fetch_one(db)
+    .await?;
+
+    Ok(User {
+        id: user.0,
+        nickname: user.1,
+        email: user.2,
+        public_key: user.3,
+        wallet_address: None,
+        balance: user.4,
+    })
+}
+
+/// Generate and store challenge for wallet auth
+pub async fn get_wallet_challenge(db: &PgPool, address: &str) -> Result<String> {
+    // validate ss58 format
+    decode_ss58(address).map_err(|e| ApiError::InvalidRequest(e))?;
+
+    let challenge = generate_challenge();
+    let expires = chrono::Utc::now() + chrono::Duration::minutes(5);
+
+    // store challenge keyed by wallet address (reuse auth_challenges table with public_key column)
+    sqlx::query(
+        r#"
+        INSERT INTO auth_challenges (public_key, challenge, expires_at)
+        VALUES ($1, $2, $3)
+        "#,
+    )
+    .bind(&format!("wallet:{}", address))
+    .bind(&challenge)
+    .bind(expires)
+    .execute(db)
+    .await?;
+
+    Ok(challenge)
+}
+
+/// Verify wallet signature and create session
+pub async fn verify_wallet_login(
+    db: &PgPool,
+    address: &str,
+    challenge: &str,
+    signature: &str,
+) -> Result<(User, String)> {
+    // decode ss58 to get raw pubkey
+    let pubkey = decode_ss58(address).map_err(|e| ApiError::InvalidRequest(e))?;
+
+    // verify challenge exists and not expired
+    let challenge_key = format!("wallet:{}", address);
+    let challenge_row: Option<(Uuid,)> = sqlx::query_as(
+        r#"
+        SELECT id FROM auth_challenges
+        WHERE public_key = $1 AND challenge = $2 AND expires_at > NOW()
+        "#,
+    )
+    .bind(&challenge_key)
+    .bind(challenge)
+    .fetch_optional(db)
+    .await?;
+
+    let Some((challenge_id,)) = challenge_row else {
+        return Err(ApiError::InvalidCredentials);
+    };
+
+    // polkadot signRaw wraps as <Bytes>msg</Bytes>
+    let wrapped = format!("<Bytes>sonotxt:{}</Bytes>", challenge);
+    if !verify_sr25519(&pubkey, wrapped.as_bytes(), signature) {
+        return Err(ApiError::InvalidCredentials);
+    }
+
+    // delete used challenge
+    sqlx::query("DELETE FROM auth_challenges WHERE id = $1")
+        .bind(challenge_id)
+        .execute(db)
+        .await?;
+
+    // get or create user
+    let user = get_or_create_wallet_user(db, address).await?;
+
+    // create session
+    let token = generate_session_token();
+    let token_hash = hash_token(&token);
+    let expires = chrono::Utc::now() + chrono::Duration::days(30);
+
+    sqlx::query(
+        r#"
+        INSERT INTO sessions (user_id, token_hash, expires_at)
+        VALUES ($1, $2, $3)
+        "#,
+    )
+    .bind(user.id)
+    .bind(&token_hash)
+    .bind(expires)
+    .execute(db)
+    .await?;
+
+    sqlx::query("UPDATE users SET last_login = NOW() WHERE id = $1")
+        .bind(user.id)
+        .execute(db)
+        .await?;
+
+    Ok((user, token))
 }
 
 #[cfg(test)]
