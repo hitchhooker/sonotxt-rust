@@ -156,6 +156,18 @@ pub struct Config {
     // vibevoice tts service url (python service on bkk07)
     #[arg(long, env = "VIBEVOICE_URL")]
     pub vibevoice_url: Option<String>,
+
+    // qwen speech service (TTS + ASR via quicnet proxy)
+    #[arg(long, env = "QWEN_SPEECH_URL")]
+    pub qwen_speech_url: Option<String>,
+
+    // API key for quicnet TTS proxy (Authorization: Bearer <key>)
+    #[arg(long, env = "QWEN_SPEECH_API_KEY")]
+    pub qwen_speech_api_key: Option<String>,
+
+    // qwen LLM chat service (on vast.ai GPU)
+    #[arg(long, env = "QWEN_LLM_URL")]
+    pub qwen_llm_url: Option<String>,
 }
 
 impl Config {

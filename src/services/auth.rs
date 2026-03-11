@@ -38,13 +38,13 @@ impl AuthService {
         {
             // send via jmap
             let html_body = format!(
-                r#"<h2>Login to SonoTxt</h2>
+                r#"<h2>Login to sonotxt</h2>
 <p>Click the link below to login. This link expires in 15 minutes.</p>
-<p><a href="{link}">Login to SonoTxt</a></p>
+<p><a href="{link}">Login to sonotxt</a></p>
 <p>Or copy this URL: {link}</p>"#
             );
 
-            Self::send_jmap_email(jmap_url, user, pass, &config.jmap_from, email_addr, "SonoTxt Login Link", &html_body)
+            Self::send_jmap_email(jmap_url, user, pass, &config.jmap_from, email_addr, "sonotxt login link", &html_body)
                 .await
                 .map_err(|e| ApiError::Internal(format!("jmap send: {}", e)))?;
         } else {
@@ -55,7 +55,7 @@ impl AuthService {
         Ok(())
     }
 
-    async fn send_jmap_email(
+    pub async fn send_jmap_email(
         jmap_url: &str,
         username: &str,
         password: &str,

@@ -31,7 +31,7 @@ async fn main() {
         .expect("Failed to run migrations");
 
     let http = reqwest::Client::builder()
-        .user_agent("SonoTxt/1.0")
+        .user_agent("sonotxt/1.0")
         .timeout(std::time::Duration::from_secs(config.request_timeout))
         .build()
         .expect("HTTP client failed");

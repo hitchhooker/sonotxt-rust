@@ -149,13 +149,31 @@ pub async fn verify_magic_link(db: &PgPool, token: &str) -> Result<(User, String
     ))
 }
 
-/// Send magic link email (stub - implement with your email provider)
+/// Send magic link email via JMAP
 pub async fn send_magic_link_email(email: &str, token: &str, base_url: &str) -> Result<()> {
     let link = format!("{}/auth/verify?token={}", base_url, token);
 
-    // TODO: integrate with email service (sendgrid, ses, resend, etc)
-    // For now, log it
-    tracing::info!("Magic link for {}: {}", email, link);
+    let jmap_url = std::env::var("JMAP_URL").ok();
+    let jmap_user = std::env::var("JMAP_USER").ok();
+    let jmap_pass = std::env::var("JMAP_PASS").ok();
+    let jmap_from = std::env::var("JMAP_FROM").unwrap_or_else(|_| "noreply@sonotxt.com".into());
+
+    if let (Some(url), Some(user), Some(pass)) = (jmap_url, jmap_user, jmap_pass) {
+        let html_body = format!(
+            r#"<h2>Login to sonotxt</h2>
+<p>Click the link below to login. This link expires in 15 minutes.</p>
+<p><a href="{link}">Login to sonotxt</a></p>
+<p>Or copy this URL: {link}</p>"#
+        );
+
+        crate::services::auth::AuthService::send_jmap_email(
+            &url, &user, &pass, &jmap_from, email, "sonotxt login link", &html_body,
+        )
+        .await
+        .map_err(|e| ApiError::Internal(format!("jmap send: {e}")))?;
+    } else {
+        tracing::info!("Magic link for {} (no JMAP configured): {}", email, link);
+    }
 
     Ok(())
 }

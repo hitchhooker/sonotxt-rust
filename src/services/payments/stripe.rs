@@ -122,7 +122,7 @@ impl StripeService {
                     currency: currency.as_str().into(),
                     unit_amount: amount_cents,
                     product_data: ProductData {
-                        name: format!("{}{:.2} SonoTxt Credits", currency.symbol(), amount),
+                        name: format!("{}{:.2} sonotxt credits", currency.symbol(), amount),
                     },
                 },
                 quantity: 1,

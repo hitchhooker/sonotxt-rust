@@ -65,6 +65,9 @@ const VALID_VOICES: &[&str] = &[
     // vibevoice voices
     "en-Carter_man", "en-Davis_man", "en-Emma_woman",
     "en-Frank_man", "en-Grace_woman", "en-Mike_man",
+    // qwen3-tts voices
+    "ryan", "serena", "aiden", "vivian", "eric",
+    "dylan", "sohee", "ono_anna", "uncle_fu",
 ];
 
 pub fn routes() -> Router<Arc<AppState>> {
@@ -228,7 +231,7 @@ async fn tts(
 
     // validate engine
     let engine = match req.engine.as_str() {
-        "kokoro" | "vibevoice" | "vibevoice-streaming" => req.engine.clone(),
+        "kokoro" | "qwen" | "vibevoice" | "vibevoice-streaming" => req.engine.clone(),
         _ => default_engine(),
     };
 

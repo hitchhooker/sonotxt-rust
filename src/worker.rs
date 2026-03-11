@@ -131,6 +131,10 @@ async fn process_next_job(state: &Arc<AppState>, storage: &StorageService) -> Re
 
     // Route to appropriate TTS engine
     let tts_result = match engine {
+        "qwen" => {
+            info!("Using Qwen3-TTS engine (GPU)");
+            generate_tts_qwen(state, &text, voice).await
+        }
         "vibevoice" | "vibevoice-streaming" => {
             info!("Using VibeVoice TTS engine: {}", engine);
             generate_tts_vibevoice(state, &text, voice, engine).await
@@ -451,6 +455,89 @@ async fn generate_tts_vibevoice(
         duration_seconds: vibe_response.duration_seconds,
         runtime_ms: Some(runtime_ms),
         cost: None, // self-hosted, no external cost
+        request_id: None,
+    })
+}
+
+async fn generate_tts_qwen(state: &AppState, text: &str, speaker: &str) -> Result<TtsResult> {
+    let qwen_url = state
+        .config
+        .qwen_speech_url
+        .as_ref()
+        .ok_or_else(|| {
+            error!("QWEN_SPEECH_URL not configured");
+            crate::error::ApiError::InternalError
+        })?;
+
+    #[derive(serde::Serialize)]
+    struct QwenRequest {
+        text: String,
+        speaker: String,
+        language: String,
+    }
+
+    let start = std::time::Instant::now();
+
+    let mut req = state
+        .http
+        .post(format!("{}/synthesize", qwen_url))
+        .header("Content-Type", "application/json");
+
+    if let Some(ref api_key) = state.config.qwen_speech_api_key {
+        req = req.header("Authorization", format!("Bearer {}", api_key));
+    }
+
+    let response = req
+        .json(&QwenRequest {
+            text: text.to_string(),
+            speaker: speaker.to_string(),
+            language: "auto".to_string(),
+        })
+        .timeout(std::time::Duration::from_secs(180))
+        .send()
+        .await
+        .map_err(|e| {
+            error!("Qwen TTS request failed: {:?}", e);
+            crate::error::ApiError::ProcessingFailed
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        error!("Qwen TTS error {}: {}", status, body);
+        return Err(crate::error::ApiError::ProcessingFailed);
+    }
+
+    // Response is raw WAV bytes
+    let wav_data = response.bytes().await.map_err(|e| {
+        error!("Failed to read Qwen TTS response: {:?}", e);
+        crate::error::ApiError::ProcessingFailed
+    })?;
+
+    let runtime_ms = start.elapsed().as_millis() as i64;
+
+    // Parse WAV header for duration (16-bit mono)
+    let duration_seconds = if wav_data.len() > 44 {
+        let sample_rate = u32::from_le_bytes([wav_data[24], wav_data[25], wav_data[26], wav_data[27]]);
+        let data_size = u32::from_le_bytes([wav_data[40], wav_data[41], wav_data[42], wav_data[43]]);
+        data_size as f64 / (sample_rate as f64 * 2.0)
+    } else {
+        0.0
+    };
+
+    info!(
+        "Qwen TTS completed: {:.1}s audio, {} bytes, {}ms runtime",
+        duration_seconds,
+        wav_data.len(),
+        runtime_ms
+    );
+
+    Ok(TtsResult {
+        audio_data: wav_data.to_vec(),
+        format: "wav".to_string(),
+        duration_seconds,
+        runtime_ms: Some(runtime_ms),
+        cost: None,
         request_id: None,
     })
 }

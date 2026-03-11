@@ -3,6 +3,7 @@ pub mod api;
 pub mod audio;
 pub mod auth;
 pub mod billing;
+pub mod converse;
 pub mod embed;
 pub mod payments;
 pub mod sites;
