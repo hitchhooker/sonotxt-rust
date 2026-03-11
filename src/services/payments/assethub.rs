@@ -403,8 +403,8 @@ impl hwpay::DepositCallback for DepositHandler {
             let asset_id = match deposit.asset {
                 hwpay::Asset::Usdc => self.usdc_asset_id,
                 hwpay::Asset::Usdt => self.usdt_asset_id,
-                hwpay::Asset::Dot => {
-                    tracing::debug!("skipping sweep for native DOT");
+                hwpay::Asset::Dot | hwpay::Asset::Zec => {
+                    tracing::debug!("skipping sweep for native asset {:?}", deposit.asset);
                     return Ok(());
                 }
             };
