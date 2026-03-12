@@ -30,6 +30,8 @@ pub struct AppState {
     pub db: PgPool,
     /// hwpay payment processor with TPM-sealed secrets
     pub payments: Arc<RwLock<hwpay::PaymentProcessor>>,
+    /// SONO payment channel service (if configured)
+    pub sono: Option<Arc<services::sono::SonoService>>,
 }
 
 fn build_cors(origins: &str) -> CorsLayer {
@@ -66,8 +68,9 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .merge(routes::embed::routes())
         .merge(routes::audio::routes())
         .nest("/api/voice", routes::converse::routes())
+        .nest("/api/sono", routes::sono::routes())
         .layer(cors)
-        .layer(RequestBodyLimitLayer::new(1024 * 1024))
+        .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024))
         .layer(TimeoutLayer::new(std::time::Duration::from_secs(
             state.config.request_timeout,
         )))

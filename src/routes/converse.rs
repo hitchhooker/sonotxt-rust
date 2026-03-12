@@ -75,6 +75,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/converse", post(converse))
         .route("/transcribe", post(transcribe))
         .route("/chat", post(chat))
+        .route("/synthesize", post(synthesize))
 }
 
 /// Full voice pipeline: ASR → LLM → TTS (sentence-by-sentence)
@@ -216,6 +217,39 @@ struct ChatRequest {
 struct ChatResponse {
     response: String,
     sentences: Vec<String>,
+}
+
+/// Standalone TTS endpoint — proxies to Qwen speech service
+async fn synthesize(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<SynthesizeRequest>,
+) -> Result<Response, StatusCode> {
+    let speech_url = state.config.qwen_speech_url.as_ref()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+
+    let (audio_b64, duration) = synthesize_sentence(
+        &state.http, speech_url, &req.text, &req.speaker, &req.language,
+    ).await.map_err(|e| {
+        error!("TTS failed: {}", e);
+        StatusCode::BAD_GATEWAY
+    })?;
+
+    Ok(Json(SynthesizeResponse { audio_base64: audio_b64, duration_seconds: duration }).into_response())
+}
+
+#[derive(Debug, Deserialize)]
+struct SynthesizeRequest {
+    text: String,
+    #[serde(default = "default_speaker")]
+    speaker: String,
+    #[serde(default = "default_language")]
+    language: String,
+}
+
+#[derive(Debug, Serialize)]
+struct SynthesizeResponse {
+    audio_base64: String,
+    duration_seconds: f64,
 }
 
 // ── internal helpers ──────────────────────────────────────────────────

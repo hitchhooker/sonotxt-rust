@@ -58,5 +58,8 @@ toml = "0.8"
 # local tts inference
 kokoro-tts = "0.3"
 
+# SONO token / payment channel (pallet-revive eth-RPC)
+alloy = { version = "1", features = ["provider-ws", "sol-types", "signers", "signer-local", "contract"] }
+
 [dev-dependencies]
 tempfile = "3"

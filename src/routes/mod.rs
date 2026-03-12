@@ -10,3 +10,4 @@ pub mod sites;
 pub mod user_auth;
 pub mod vault;
 pub mod ws;
+pub mod sono;

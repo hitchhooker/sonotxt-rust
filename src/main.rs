@@ -1,6 +1,7 @@
 use sonotxt::{build_app, worker, AppState, Config};
 use sonotxt::services::payments::assethub::{AssetHubListener, DepositHandler};
 use sonotxt::services::payments::penumbra::PenumbraListener;
+use sonotxt::services::sono::{SonoConfig, SonoService};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -43,12 +44,23 @@ async fn main() {
         .expect("Failed to open vault");
     let payments = hwpay::PaymentProcessor::new(vault);
 
+    // Initialize SONO payment channel service (if configured)
+    let sono = SonoConfig::from_env().map(|cfg| {
+        tracing::info!(
+            contract = %cfg.contract,
+            service = %cfg.service_key.address(),
+            "SONO payment channels enabled"
+        );
+        Arc::new(SonoService::new(cfg))
+    });
+
     let state = Arc::new(AppState {
         config: config.clone(),
         redis,
         http,
         db,
         payments: Arc::new(RwLock::new(payments)),
+        sono,
     });
 
     // Spawn TTS worker
@@ -74,6 +86,16 @@ async fn main() {
             let listener = PenumbraListener::new(listener_state);
             if let Err(e) = listener.run().await {
                 tracing::error!("penumbra listener failed: {}", e);
+            }
+        });
+    }
+
+    // Spawn SONO payment channel listener (if configured)
+    if let Some(sono) = &state.sono {
+        let sono = sono.clone();
+        tokio::spawn(async move {
+            if let Err(e) = sono.start_listener().await {
+                tracing::error!("SONO listener failed: {}", e);
             }
         });
     }
