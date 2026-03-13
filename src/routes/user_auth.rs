@@ -371,6 +371,21 @@ pub async fn wallet_verify(
         Ok((user, token)) => {
             user_auth::clear_rate_limit(&mut redis, "wallet_login", &req.address).await;
 
+            // Testnet faucet: drip PAS + TXT to new users
+            if let Some(sono) = &state.sono {
+                let is_new = user.balance == 0.0;
+                if is_new {
+                    let addr = &req.address;
+                    let sono = sono.clone();
+                    let addr = addr.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) = drip_to_wallet(&sono, &addr).await {
+                            tracing::warn!(address = %addr, "testnet drip failed: {}", e);
+                        }
+                    });
+                }
+            }
+
             Ok(Json(AuthResponse {
                 user_id: user.id.to_string(),
                 nickname: user.nickname,
@@ -382,6 +397,32 @@ pub async fn wallet_verify(
         }
         Err(e) => Err(e),
     }
+}
+
+/// Drip testnet PAS + TXT to a new user's mapped EVM address
+async fn drip_to_wallet(
+    sono: &Arc<crate::services::sono::SonoService>,
+    ss58_address: &str,
+) -> anyhow::Result<()> {
+    // Map SS58 → AccountId32 → H160
+    // pallet-revive: H160 = first 20 bytes of AccountId32
+    // AccountId32 for mapped accounts = H160 + 12 bytes of 0xEE
+    // But here we go the other way: SS58 → AccountId32, take first 20 bytes as H160
+    let pubkey = user_auth::decode_ss58(ss58_address)
+        .map_err(|e| anyhow::anyhow!("bad ss58: {}", e))?;
+
+    // The H160 address is the first 20 bytes of the AccountId32
+    let mut h160 = [0u8; 20];
+    h160.copy_from_slice(&pubkey[..20]);
+    let evm_addr = alloy::primitives::Address::from(h160);
+
+    // 10 PAS (18 decimals) + 100 TXT (10 decimals)
+    let pas = alloy::primitives::U256::from(10_000_000_000_000_000_000u128); // 10 PAS
+    let txt = alloy::primitives::U256::from(1_000_000_000_000u128); // 100 TXT
+
+    tracing::info!(ss58 = %ss58_address, evm = %evm_addr, "dripping testnet tokens");
+    sono.drip_testnet(evm_addr, pas, txt).await?;
+    Ok(())
 }
 
 // ============================================================================

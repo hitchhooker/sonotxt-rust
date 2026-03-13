@@ -168,6 +168,19 @@ pub struct Config {
     // qwen LLM chat service (on vast.ai GPU)
     #[arg(long, env = "QWEN_LLM_URL")]
     pub qwen_llm_url: Option<String>,
+
+    // SONO pricing
+    /// Base SONO price in USD (default $0.01)
+    #[arg(long, env = "SONO_PRICE_USD", default_value = "0.01")]
+    pub sono_price_usd: f64,
+
+    /// Fiat premium percentage (0.05 = 5%)
+    #[arg(long, env = "SONO_FIAT_PREMIUM", default_value = "0.10")]
+    pub sono_fiat_premium: f64,
+
+    /// Price oracle update interval in seconds
+    #[arg(long, env = "SONO_PRICE_INTERVAL", default_value = "300")]
+    pub sono_price_interval: u64,
 }
 
 impl Config {

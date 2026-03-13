@@ -24,6 +24,7 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/sign-state", post(sign_state))
         .route("/settle", post(settle))
         .route("/info", get(info))
+        .route("/price", get(price))
 }
 
 #[derive(Debug, Deserialize)]
@@ -57,6 +58,16 @@ struct InfoResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct PriceResponse {
+    dot_usd: f64,
+    sono_per_dot: String,
+    sono_usd_base: f64,
+    sono_usd_fiat: f64,
+    fiat_premium_pct: f64,
+    updated_ago_secs: u64,
+}
+
+#[derive(Debug, Serialize)]
 struct SignStateResponse {
     spent: String,
     nonce: u64,
@@ -85,6 +96,31 @@ async fn info(State(state): State<Arc<AppState>>) -> Json<InfoResponse> {
             chain_id: 0,
             rpc_url: String::new(),
             enabled: false,
+        }),
+    }
+}
+
+/// GET /api/sono/price — current SONO pricing info
+async fn price(State(state): State<Arc<AppState>>) -> Json<PriceResponse> {
+    match &state.sono {
+        Some(sono) => {
+            let p = sono.price.read().await;
+            Json(PriceResponse {
+                dot_usd: p.dot_usd,
+                sono_per_dot: format!("{}", p.txt_per_dot),
+                sono_usd_base: p.txt_usd_base,
+                sono_usd_fiat: p.txt_usd_fiat,
+                fiat_premium_pct: state.config.sono_fiat_premium * 100.0,
+                updated_ago_secs: p.updated_at.elapsed().as_secs(),
+            })
+        }
+        None => Json(PriceResponse {
+            dot_usd: 0.0,
+            sono_per_dot: "0".into(),
+            sono_usd_base: 0.0,
+            sono_usd_fiat: 0.0,
+            fiat_premium_pct: 0.0,
+            updated_ago_secs: 0,
         }),
     }
 }

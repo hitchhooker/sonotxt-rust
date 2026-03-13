@@ -90,12 +90,20 @@ async fn main() {
         });
     }
 
-    // Spawn SONO payment channel listener (if configured)
+    // Spawn SONO payment channel listener + price oracle (if configured)
     if let Some(sono) = &state.sono {
-        let sono = sono.clone();
+        let sono_listener = sono.clone();
         tokio::spawn(async move {
-            if let Err(e) = sono.start_listener().await {
+            if let Err(e) = sono_listener.start_listener().await {
                 tracing::error!("SONO listener failed: {}", e);
+            }
+        });
+
+        let sono_oracle = sono.clone();
+        let oracle_http = state.http.clone();
+        tokio::spawn(async move {
+            if let Err(e) = sono_oracle.start_price_oracle(oracle_http).await {
+                tracing::error!("SONO price oracle failed: {}", e);
             }
         });
     }
