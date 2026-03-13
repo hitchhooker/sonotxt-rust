@@ -133,7 +133,43 @@ impl AuthService {
             .and_then(|v| v.as_str())
             .ok_or("no blobId")?;
 
-        // submit email
+        // query Sent mailbox and identity
+        let lookup_req = serde_json::json!({
+            "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail", "urn:ietf:params:jmap:submission"],
+            "methodCalls": [
+                ["Mailbox/query", {
+                    "accountId": account_id,
+                    "filter": { "role": "sent" }
+                }, "mb"],
+                ["Identity/get", {
+                    "accountId": account_id
+                }, "id"]
+            ]
+        });
+
+        let lookup_resp: serde_json::Value = client
+            .post(api_url)
+            .basic_auth(username, Some(password))
+            .json(&lookup_req)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?
+            .json()
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let sent_mailbox_id = lookup_resp["methodResponses"][0][1]["ids"][0]
+            .as_str()
+            .ok_or("no Sent mailbox found")?;
+
+        let identity_id = lookup_resp["methodResponses"][1][1]["list"][0]["id"]
+            .as_str()
+            .ok_or("no identity found")?;
+
+        // import email into Sent and submit
+        let mut mailbox_ids = serde_json::Map::new();
+        mailbox_ids.insert(sent_mailbox_id.to_string(), serde_json::json!(true));
+
         let submit_req = serde_json::json!({
             "using": ["urn:ietf:params:jmap:core", "urn:ietf:params:jmap:mail", "urn:ietf:params:jmap:submission"],
             "methodCalls": [
@@ -142,7 +178,7 @@ impl AuthService {
                     "emails": {
                         "draft1": {
                             "blobId": blob_id,
-                            "mailboxIds": {}
+                            "mailboxIds": mailbox_ids
                         }
                     }
                 }, "0"],
@@ -150,6 +186,7 @@ impl AuthService {
                     "accountId": account_id,
                     "create": {
                         "sub1": {
+                            "identityId": identity_id,
                             "emailId": "#draft1",
                             "envelope": {
                                 "mailFrom": { "email": from },
