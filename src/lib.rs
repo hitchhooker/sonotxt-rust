@@ -32,6 +32,8 @@ pub struct AppState {
     pub payments: Arc<RwLock<hwpay::PaymentProcessor>>,
     /// SONO payment channel service (if configured)
     pub sono: Option<Arc<services::sono::SonoService>>,
+    /// GPU worker pool with load balancing and health checks
+    pub workers: Option<Arc<services::worker_pool::WorkerPool>>,
 }
 
 fn build_cors(origins: &str) -> CorsLayer {
@@ -69,6 +71,9 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .merge(routes::audio::routes())
         .nest("/api/voice", routes::converse::routes())
         .nest("/api/sono", routes::sono::routes())
+        .nest("/api/auth/passkey", routes::passkey::routes())
+        .nest("/api/contacts", routes::contacts::routes())
+        .merge(routes::p2p::routes())
         .layer(cors)
         .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024))
         .layer(TimeoutLayer::new(std::time::Duration::from_secs(

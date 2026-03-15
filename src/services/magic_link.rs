@@ -144,6 +144,7 @@ pub async fn verify_magic_link(db: &PgPool, token: &str) -> Result<(User, String
             public_key: user.3,
             wallet_address: None,
             balance: user.4,
+            avatar: None,
         },
         session_token,
     ))

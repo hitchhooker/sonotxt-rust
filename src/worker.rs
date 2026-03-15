@@ -460,14 +460,21 @@ async fn generate_tts_vibevoice(
 }
 
 async fn generate_tts_qwen(state: &AppState, text: &str, speaker: &str) -> Result<TtsResult> {
-    let qwen_url = state
-        .config
-        .qwen_speech_url
-        .as_ref()
-        .ok_or_else(|| {
-            error!("QWEN_SPEECH_URL not configured");
-            crate::error::ApiError::InternalError
+    // Resolve speech URL: prefer worker pool, fall back to single URL
+    let (qwen_url, _guard) = if let Some(ref pool) = state.workers {
+        let worker = pool.pick().ok_or_else(|| {
+            error!("no workers available in pool");
+            crate::error::ApiError::ProcessingFailed
         })?;
+        let guard = crate::services::worker_pool::InflightGuard::new(&worker);
+        (worker.speech_url.clone(), Some(guard))
+    } else {
+        let url = state.config.qwen_speech_url.as_ref().ok_or_else(|| {
+            error!("QWEN_SPEECH_URL not configured and no worker pool");
+            crate::error::ApiError::InternalError
+        })?.clone();
+        (url, None)
+    };
 
     #[derive(serde::Serialize)]
     struct QwenRequest {

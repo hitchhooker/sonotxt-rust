@@ -11,4 +11,6 @@ pub mod storage;
 pub mod tpm;
 pub mod user_auth;
 pub mod wallet;
+pub mod passkey;
 pub mod sono;
+pub mod worker_pool;

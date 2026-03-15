@@ -11,7 +11,7 @@ use std::{collections::HashMap, sync::Arc};
 use uuid::Uuid;
 
 use crate::{
-    auth::{AuthenticatedUser, TtsUser, check_free_tier_limit, get_free_tier_remaining, FREE_TIER_DAILY_LIMIT, FREE_TIER_LOGGED_IN_LIMIT},
+    auth::{AuthenticatedUser, TtsUser, check_free_tier_limit, check_free_tier_limit_with, consume_free_tier, get_free_tier_remaining, hash_ip, FREE_TIER_DAILY_LIMIT, FREE_TIER_LOGGED_IN_LIMIT},
     error::Result,
     models::{JobStatus, ProcessRequest, ProcessResponse},
     services::content::extract_content,
@@ -79,35 +79,70 @@ pub fn routes() -> Router<Arc<AppState>> {
         .route("/voices", get(list_voices))
         .route("/download/{job_id}", get(download_audio))
         .route("/free-balance", get(free_balance))
+        .route("/workers", get(workers_status))
+}
+
+/// Worker pool status — shows all GPU workers, health, load
+async fn workers_status(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    if let Some(ref pool) = state.workers {
+        Json(serde_json::json!({
+            "workers": pool.status(),
+            "healthy": pool.healthy_count(),
+            "total": pool.len(),
+        }))
+    } else {
+        // Legacy single-worker mode
+        Json(serde_json::json!({
+            "workers": [],
+            "healthy": 0,
+            "total": 0,
+            "legacy": {
+                "speech_url": state.config.qwen_speech_url,
+                "llm_url": state.config.qwen_llm_url,
+            }
+        }))
+    }
 }
 
 async fn list_voices(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
     let samples_url = format!("{}/samples", state.config.audio_public_url);
 
-    // Build voices with sample URLs
-    let voices_with_samples: Vec<serde_json::Value> = VALID_VOICES
+    // Read voices from DB (marketplace-ready)
+    let rows: Vec<(String, String, String, String, Option<String>, String)> = sqlx::query_as(
+        r#"
+        SELECT v.name, v.display_name, v.language, m.name as model_name,
+               v.gender, p.name as provider_name
+        FROM voices v
+        JOIN models m ON v.model_id = m.id
+        JOIN providers p ON m.provider_id = p.id
+        WHERE v.active = TRUE AND m.active = TRUE AND p.active = TRUE
+        ORDER BY m.name, v.language, v.name
+        "#,
+    )
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    let voices: Vec<serde_json::Value> = rows
         .iter()
-        .map(|v| {
+        .map(|(name, display, lang, model, gender, provider)| {
             serde_json::json!({
-                "id": v,
-                "sample_url": format!("{}/{}.mp3", samples_url, v)
+                "id": name,
+                "name": display,
+                "language": lang,
+                "model": model,
+                "gender": gender,
+                "provider": provider,
+                "sample_url": format!("{}/{}.mp3", samples_url, name)
             })
         })
         .collect();
 
+    // Also keep VALID_VOICES as fallback for voice validation
     Json(serde_json::json!({
-        "voices": voices_with_samples,
+        "voices": voices,
         "default": "af_bella",
         "samples_base_url": samples_url,
-        "categories": {
-            "american_female": ["af_alloy", "af_aoede", "af_bella", "af_heart", "af_jessica", "af_kore", "af_nicole", "af_nova", "af_river", "af_sarah", "af_sky"],
-            "american_male": ["am_adam", "am_echo", "am_eric", "am_fenrir", "am_liam", "am_michael", "am_onyx", "am_puck", "am_santa"],
-            "british_female": ["bf_alice", "bf_emma", "bf_isabella", "bf_lily"],
-            "british_male": ["bm_daniel", "bm_fable", "bm_george", "bm_lewis"],
-            "japanese": ["jf_alpha", "jf_gongitsune", "jf_nezumi", "jf_tebukuro", "jm_kumo"],
-            "chinese": ["zf_xiaobei", "zf_xiaoni", "zf_xiaoxiao", "zf_xiaoyi", "zm_yunjian", "zm_yunxi", "zm_yunxia", "zm_yunyang"],
-            "vibevoice_english": ["en-Carter_man", "en-Davis_man", "en-Emma_woman", "en-Frank_man", "en-Grace_woman", "en-Mike_man"]
-        }
     }))
 }
 
@@ -150,36 +185,23 @@ async fn process(
     let content = extracted.text;
     let estimated_cost = (content.len() as f64) * state.config.cost_per_char;
 
-    // Check balance from database
-    let balance = sqlx::query_scalar!(
-        "SELECT balance FROM account_credits WHERE account_id = $1",
-        user.account_id
-    )
-    .fetch_optional(&state.db)
-    .await?
-    .unwrap_or(0.0);
+    let price = match &state.sono {
+        Some(sono) => sono.price.read().await.clone(),
+        None => crate::services::sono::PriceInfo::default(),
+    };
+    let txt_cost = crate::services::billing::txt_cost_for_chars(
+        content.len(), state.config.cost_per_char, &price,
+    );
 
-    if balance < estimated_cost {
-        return Err(crate::error::ApiError::InsufficientBalance);
-    }
+    crate::services::billing::check_and_charge(
+        &state.db,
+        state.sono.as_deref(),
+        user.account_id,
+        user.wallet_address.as_deref(),
+        txt_cost,
+    ).await?;
 
     let job_id = Uuid::new_v4().to_string();
-
-    // Atomically reserve balance and create job
-    let mut tx = state.db.begin().await?;
-
-    let rows_affected = sqlx::query!(
-        "UPDATE account_credits SET balance = balance - $1 WHERE account_id = $2 AND balance >= $1",
-        estimated_cost,
-        user.account_id
-    )
-    .execute(&mut *tx)
-    .await?
-    .rows_affected();
-
-    if rows_affected == 0 {
-        return Err(crate::error::ApiError::InsufficientBalance);
-    }
 
     sqlx::query!(
         "INSERT INTO jobs (id, api_key, text_content, status, cost) VALUES ($1, $2, $3, 'queued', $4)",
@@ -188,10 +210,8 @@ async fn process(
         content.as_str(),
         estimated_cost
     )
-    .execute(&mut *tx)
+    .execute(&state.db)
     .await?;
-
-    tx.commit().await?;
 
     Ok(Json(ProcessResponse {
         job_id,
@@ -240,70 +260,92 @@ async fn tts(
 
     match user {
         TtsUser::Authenticated(auth_user) => {
-            let estimated_cost = (text.len() as f64) * state.config.cost_per_char;
-
-            let balance = sqlx::query_scalar!(
-                "SELECT balance FROM account_credits WHERE account_id = $1",
-                auth_user.account_id
-            )
-            .fetch_optional(&state.db)
-            .await?
-            .unwrap_or(0.0);
-
-            if balance < estimated_cost {
-                return Err(crate::error::ApiError::InsufficientBalance);
-            }
-
-            // priority: paid users 10-100 based on balance, $0 balance = 1
-            let priority: i32 = if balance > 0.0 {
-                10 + ((balance * 100.0).floor() as i32).min(90)
-            } else {
-                1
-            };
-
-            let mut tx = state.db.begin().await?;
-
-            let rows_affected = sqlx::query!(
-                "UPDATE account_credits SET balance = balance - $1 WHERE account_id = $2 AND balance >= $1",
-                estimated_cost,
-                auth_user.account_id
-            )
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
-
-            if rows_affected == 0 {
-                return Err(crate::error::ApiError::InsufficientBalance);
-            }
-
             let estimated_duration_ms = (char_count as f64 * crate::models::MS_PER_CHAR) as i32;
             let storage_type = req.storage.as_deref();
 
-            sqlx::query!(
-                "INSERT INTO jobs (id, api_key, text_content, voice, status, cost, is_free_tier, char_count, estimated_duration_ms, storage_type, engine, priority) VALUES ($1, $2, $3, $4, 'queued', $5, FALSE, $6, $7, $8, $9, $10)",
-                job_id,
-                auth_user.api_key,
-                text,
-                voice,
-                estimated_cost,
-                char_count,
-                estimated_duration_ms,
-                storage_type,
-                engine,
-                priority
-            )
-            .execute(&mut *tx)
-            .await?;
+            // Get price and compute TXT cost
+            let price = match &state.sono {
+                Some(sono) => sono.price.read().await.clone(),
+                None => crate::services::sono::PriceInfo::default(),
+            };
+            let txt_cost = crate::services::billing::txt_cost_for_chars(
+                text.len(), state.config.cost_per_char, &price,
+            );
+            let estimated_cost = text.len() as f64 * state.config.cost_per_char;
 
-            tx.commit().await?;
+            // Try TXT billing (custodial balance + payment channel)
+            match crate::services::billing::check_and_charge(
+                &state.db,
+                state.sono.as_deref(),
+                auth_user.account_id,
+                auth_user.wallet_address.as_deref(),
+                txt_cost,
+            ).await {
+                Ok(_charge) => {
+                    // Paid — create job at priority 50
+                    sqlx::query!(
+                        "INSERT INTO jobs (id, api_key, text_content, voice, status, cost, is_free_tier, char_count, estimated_duration_ms, storage_type, engine, priority) VALUES ($1, $2, $3, $4, 'queued', $5, FALSE, $6, $7, $8, $9, $10)",
+                        job_id,
+                        auth_user.api_key,
+                        text,
+                        voice,
+                        estimated_cost,
+                        char_count,
+                        estimated_duration_ms,
+                        storage_type,
+                        engine,
+                        50i32
+                    )
+                    .execute(&state.db)
+                    .await?;
 
-            let estimated_seconds = estimated_duration_ms as f64 / 1000.0;
-            Ok(Json(TtsResponse {
-                job_id,
-                status: JobStatus::Queued { position: None, estimated_seconds: Some(estimated_seconds) },
-                estimated_cost: Some(estimated_cost),
-                free_tier_remaining: None,
-            }))
+                    let estimated_seconds = estimated_duration_ms as f64 / 1000.0;
+                    Ok(Json(TtsResponse {
+                        job_id,
+                        status: JobStatus::Queued { position: None, estimated_seconds: Some(estimated_seconds) },
+                        estimated_cost: Some(estimated_cost),
+                        free_tier_remaining: None,
+                    }))
+                }
+                Err(_) => {
+                    // No TXT balance — fall back to logged-in free tier (1000 chars/day)
+                    let user_hash = hash_ip(&auth_user.account_id.to_string());
+                    let remaining = check_free_tier_limit_with(
+                        &state.db, &user_hash, char_count, FREE_TIER_LOGGED_IN_LIMIT,
+                    ).await?;
+
+                    consume_free_tier(&state.db, &user_hash, char_count).await?;
+
+                    let storage_type: Option<&str> = Some("minio");
+                    let engine_type = if voice.starts_with("en-") {
+                        "vibevoice-streaming"
+                    } else {
+                        "kokoro"
+                    };
+
+                    sqlx::query(
+                        "INSERT INTO jobs (id, api_key, text_content, voice, status, cost, is_free_tier, char_count, estimated_duration_ms, storage_type, engine, priority) VALUES ($1, $2, $3, $4, 'queued', 0, TRUE, $5, $6, $7, $8, 10)",
+                    )
+                    .bind(&job_id)
+                    .bind(&auth_user.api_key)
+                    .bind(&text)
+                    .bind(&voice)
+                    .bind(char_count)
+                    .bind(estimated_duration_ms)
+                    .bind(storage_type)
+                    .bind(engine_type)
+                    .execute(&state.db)
+                    .await?;
+
+                    let estimated_seconds = estimated_duration_ms as f64 / 1000.0;
+                    Ok(Json(TtsResponse {
+                        job_id,
+                        status: JobStatus::Queued { position: None, estimated_seconds: Some(estimated_seconds) },
+                        estimated_cost: Some(0.0),
+                        free_tier_remaining: Some(remaining - char_count),
+                    }))
+                }
+            }
         }
 
         TtsUser::FreeTier { ip_hash } => {

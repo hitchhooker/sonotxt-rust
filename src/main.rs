@@ -2,6 +2,7 @@ use sonotxt::{build_app, worker, AppState, Config};
 use sonotxt::services::payments::assethub::{AssetHubListener, DepositHandler};
 use sonotxt::services::payments::penumbra::PenumbraListener;
 use sonotxt::services::sono::{SonoConfig, SonoService};
+use sonotxt::services::worker_pool::WorkerPool;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -54,6 +55,11 @@ async fn main() {
         Arc::new(SonoService::new(cfg))
     });
 
+    // Initialize worker pool (if WORKER_URLS configured)
+    let workers = config.worker_urls.as_ref().map(|urls| {
+        Arc::new(WorkerPool::new(urls, http.clone()))
+    });
+
     let state = Arc::new(AppState {
         config: config.clone(),
         redis,
@@ -61,6 +67,7 @@ async fn main() {
         db,
         payments: Arc::new(RwLock::new(payments)),
         sono,
+        workers,
     });
 
     // Spawn TTS worker
@@ -68,6 +75,19 @@ async fn main() {
     tokio::spawn(async move {
         worker::run_worker(worker_state).await;
     });
+
+    // Spawn worker pool health checker (every 10s)
+    if let Some(ref pool) = state.workers {
+        let pool_len = pool.len();
+        let pool_bg = pool.clone();
+        tokio::spawn(async move {
+            loop {
+                pool_bg.health_check().await;
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            }
+        });
+        tracing::info!("worker pool health checker started ({} workers)", pool_len);
+    }
 
     // Spawn Asset Hub deposit listener (if enabled)
     if config.assethub_listener_enabled {

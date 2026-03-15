@@ -85,20 +85,20 @@ async fn converse(
 ) -> Result<Json<ConverseResponse>, StatusCode> {
     let total_start = std::time::Instant::now();
 
-    let speech_url = state.config.qwen_speech_url.as_ref()
+    let speech_url = resolve_speech_url(&state)
         .ok_or_else(|| {
-            error!("QWEN_SPEECH_URL not configured");
+            error!("no speech worker available");
             StatusCode::SERVICE_UNAVAILABLE
         })?;
-    let llm_url = state.config.qwen_llm_url.as_ref()
+    let llm_url = resolve_llm_url(&state)
         .ok_or_else(|| {
-            error!("QWEN_LLM_URL not configured");
+            error!("no LLM worker available");
             StatusCode::SERVICE_UNAVAILABLE
         })?;
 
     // 1. ASR: audio → text
     let asr_start = std::time::Instant::now();
-    let transcript = transcribe_audio(&state.http, speech_url, &req.audio_base64).await
+    let transcript = transcribe_audio(&state.http, &speech_url, &req.audio_base64).await
         .map_err(|e| {
             error!("ASR failed: {}", e);
             StatusCode::BAD_GATEWAY
@@ -113,7 +113,7 @@ async fn converse(
         role: "user".to_string(),
         content: transcript.clone(),
     });
-    let (sentences, full_response) = chat_sentences(&state.http, llm_url, &messages).await
+    let (sentences, full_response) = chat_sentences(&state.http, &llm_url, &messages).await
         .map_err(|e| {
             error!("LLM failed: {}", e);
             StatusCode::BAD_GATEWAY
@@ -127,7 +127,7 @@ async fn converse(
 
     for sentence in &sentences {
         let tts_start = std::time::Instant::now();
-        match synthesize_sentence(&state.http, speech_url, sentence, &req.speaker, &req.language).await {
+        match synthesize_sentence(&state.http, &speech_url, sentence, &req.speaker, &req.language).await {
             Ok((audio_b64, duration)) => {
                 let tts_ms = tts_start.elapsed().as_millis() as u64;
                 tts_times.push(tts_ms);
@@ -166,10 +166,10 @@ async fn transcribe(
     State(state): State<Arc<AppState>>,
     Json(req): Json<TranscribeRequest>,
 ) -> Result<Json<TranscribeResponse>, StatusCode> {
-    let speech_url = state.config.qwen_speech_url.as_ref()
+    let speech_url = resolve_speech_url(&state)
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
 
-    let transcript = transcribe_audio(&state.http, speech_url, &req.audio_base64).await
+    let transcript = transcribe_audio(&state.http, &speech_url, &req.audio_base64).await
         .map_err(|e| {
             error!("ASR failed: {}", e);
             StatusCode::BAD_GATEWAY
@@ -193,10 +193,10 @@ async fn chat(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ChatRequest>,
 ) -> Result<Json<ChatResponse>, StatusCode> {
-    let llm_url = state.config.qwen_llm_url.as_ref()
+    let llm_url = resolve_llm_url(&state)
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
 
-    let (sentences, full_response) = chat_sentences(&state.http, llm_url, &req.messages).await
+    let (sentences, full_response) = chat_sentences(&state.http, &llm_url, &req.messages).await
         .map_err(|e| {
             error!("LLM failed: {}", e);
             StatusCode::BAD_GATEWAY
@@ -224,11 +224,11 @@ async fn synthesize(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SynthesizeRequest>,
 ) -> Result<Response, StatusCode> {
-    let speech_url = state.config.qwen_speech_url.as_ref()
+    let speech_url = resolve_speech_url(&state)
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
 
     let (audio_b64, duration) = synthesize_sentence(
-        &state.http, speech_url, &req.text, &req.speaker, &req.language,
+        &state.http, &speech_url, &req.text, &req.speaker, &req.language,
     ).await.map_err(|e| {
         error!("TTS failed: {}", e);
         StatusCode::BAD_GATEWAY
@@ -250,6 +250,26 @@ struct SynthesizeRequest {
 struct SynthesizeResponse {
     audio_base64: String,
     duration_seconds: f64,
+}
+
+// ── worker resolution ────────────────────────────────────────────────
+
+/// Resolve speech URL from worker pool or config fallback.
+fn resolve_speech_url(state: &AppState) -> Option<String> {
+    if let Some(ref pool) = state.workers {
+        pool.pick().map(|w| w.speech_url.clone())
+    } else {
+        state.config.qwen_speech_url.clone()
+    }
+}
+
+/// Resolve LLM URL from worker pool or config fallback.
+fn resolve_llm_url(state: &AppState) -> Option<String> {
+    if let Some(ref pool) = state.workers {
+        pool.pick_llm().map(|w| w.llm_url.clone())
+    } else {
+        state.config.qwen_llm_url.clone()
+    }
 }
 
 // ── internal helpers ──────────────────────────────────────────────────

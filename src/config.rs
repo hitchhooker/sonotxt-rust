@@ -169,6 +169,13 @@ pub struct Config {
     #[arg(long, env = "QWEN_LLM_URL")]
     pub qwen_llm_url: Option<String>,
 
+    /// Worker pool: comma-separated base URLs for GPU workers.
+    /// Each URL is a speech service on :8080; LLM is derived as :8090.
+    /// When set, load-balances across all workers with health checks.
+    /// Example: `http://1.2.3.4:8080,http://5.6.7.8:8080`
+    #[arg(long, env = "WORKER_URLS")]
+    pub worker_urls: Option<String>,
+
     // SONO pricing
     /// Base SONO price in USD (default $0.01)
     #[arg(long, env = "SONO_PRICE_USD", default_value = "0.01")]
