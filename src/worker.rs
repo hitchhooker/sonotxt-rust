@@ -1,41 +1,11 @@
 use crate::{error::Result, services::storage::{StorageBackend, StorageService}, AppState};
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::process::Command;
 use tokio::time::{sleep, Duration};
 use tracing::{error, info, warn};
 
-const KOKORO_API_URL: &str = "https://api.deepinfra.com/v1/inference/hexgrad/Kokoro-82M";
-
-#[derive(Debug, Serialize)]
-struct KokoroRequest {
-    text: String,
-    output_format: String,
-    preset_voice: Vec<String>,
-    speed: f64,
-}
-
-#[derive(Debug, Deserialize)]
-struct KokoroResponse {
-    audio: Option<String>,
-    inference_status: Option<InferenceStatus>,
-    request_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct InferenceStatus {
-    status: String,
-    runtime_ms: Option<i64>,
-    cost: Option<f64>,
-}
-
 pub async fn run_worker(state: Arc<AppState>) {
     info!("TTS worker started");
-
-    if state.config.deepinfra_token.is_none() {
-        warn!("DEEPINFRA_TOKEN not set - TTS will fail");
-    }
 
     // Initialize storage service
     let storage = StorageService::new(state.config.clone()).await;
@@ -123,25 +93,46 @@ async fn process_next_job(state: &Arc<AppState>, storage: &StorageService) -> Re
     };
 
     let voice = job.voice.as_str();
-    let engine = job.engine.as_deref().unwrap_or("kokoro");
+    let engine = job.engine.as_deref().unwrap_or("qwen");
 
     // Determine storage backend (job preference or default)
     let storage_type = job.storage_type.as_deref().unwrap_or(&state.config.default_storage);
     let backend = StorageBackend::from(storage_type);
 
-    // Route to appropriate TTS engine
+    // Route to appropriate TTS engine.
+    // Worker pool routes through composed service (load balanced + timeout + retry).
+    // Falls back to direct HTTP when pool is not configured.
     let tts_result = match engine {
-        "qwen" => {
-            info!("Using Qwen3-TTS engine (GPU)");
-            generate_tts_qwen(state, &text, voice).await
-        }
         "vibevoice" | "vibevoice-streaming" => {
             info!("Using VibeVoice TTS engine: {}", engine);
             generate_tts_vibevoice(state, &text, voice, engine).await
         }
         _ => {
-            info!("Using Kokoro TTS engine (DeepInfra)");
-            generate_tts_kokoro(state, &text, voice).await
+            if let Some(ref pool) = state.workers {
+                info!("TTS via worker pool (load balanced)");
+                let req = crate::services::worker_pool::TtsRequest {
+                    text: text.clone(),
+                    speaker: voice.to_string(),
+                    language: "auto".to_string(),
+                    api_key: state.config.qwen_speech_api_key.clone(),
+                };
+                pool.tts(req).await
+                    .map(|r| TtsResult {
+                        audio_data: r.audio_data,
+                        format: r.format,
+                        duration_seconds: r.duration_seconds,
+                        runtime_ms: Some(r.runtime_ms as i64),
+                        cost: None,
+                        request_id: None,
+                    })
+                    .map_err(|e| {
+                        error!("worker pool TTS: {}", e);
+                        crate::error::ApiError::ProcessingFailed
+                    })
+            } else {
+                info!("TTS direct (no pool)");
+                generate_tts_qwen(state, &text, voice).await
+            }
         }
     };
 
@@ -292,83 +283,6 @@ async fn wrap_opus_in_ogg(opus_data: &[u8]) -> Result<Vec<u8>> {
     Ok(output.stdout)
 }
 
-async fn generate_tts_kokoro(state: &AppState, text: &str, voice: &str) -> Result<TtsResult> {
-    let token = state
-        .config
-        .deepinfra_token
-        .as_ref()
-        .ok_or(crate::error::ApiError::InternalError)?;
-
-    // request opus for best compression, fallback handled by API
-    let output_format = "opus";
-
-    let request = KokoroRequest {
-        text: text.to_string(),
-        output_format: output_format.to_string(),
-        preset_voice: vec![voice.to_string()],
-        speed: 1.0,
-    };
-
-    let response = state
-        .http
-        .post(KOKORO_API_URL)
-        .header("Authorization", format!("bearer {}", token))
-        .header("Content-Type", "application/json")
-        .json(&request)
-        .send()
-        .await
-        .map_err(|e| {
-            error!("Kokoro API request failed: {:?}", e);
-            crate::error::ApiError::ProcessingFailed
-        })?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        error!("Kokoro API error {}: {}", status, body);
-        return Err(crate::error::ApiError::ProcessingFailed);
-    }
-
-    let kokoro_response: KokoroResponse = response.json().await.map_err(|e| {
-        error!("Failed to parse Kokoro response: {:?}", e);
-        crate::error::ApiError::ProcessingFailed
-    })?;
-
-    // Extract deepinfra stats
-    let (runtime_ms, cost) = kokoro_response
-        .inference_status
-        .map(|s| (s.runtime_ms, s.cost))
-        .unwrap_or((None, None));
-
-    let audio_data_url = kokoro_response
-        .audio
-        .ok_or(crate::error::ApiError::ProcessingFailed)?;
-
-    // Strip data URL prefix (e.g., "data:audio/wav;base64," or "data:audio/mp3;base64,")
-    let audio_base64 = audio_data_url
-        .split(',')
-        .nth(1)
-        .unwrap_or(&audio_data_url);
-
-    let audio_data = BASE64.decode(audio_base64).map_err(|e| {
-        error!("Failed to decode audio base64: {:?}", e);
-        crate::error::ApiError::ProcessingFailed
-    })?;
-
-    // Estimate duration based on audio size
-    // opus ~64kbps = 8KB/sec, mp3 similar
-    let duration_seconds = audio_data.len() as f64 / 8000.0;
-
-    Ok(TtsResult {
-        audio_data,
-        format: output_format.to_string(),
-        duration_seconds,
-        runtime_ms,
-        cost,
-        request_id: kokoro_response.request_id,
-    })
-}
-
 async fn generate_tts_vibevoice(
     state: &AppState,
     text: &str,
@@ -459,22 +373,12 @@ async fn generate_tts_vibevoice(
     })
 }
 
+/// Direct Qwen TTS — legacy fallback when worker pool is not configured.
 async fn generate_tts_qwen(state: &AppState, text: &str, speaker: &str) -> Result<TtsResult> {
-    // Resolve speech URL: prefer worker pool, fall back to single URL
-    let (qwen_url, _guard) = if let Some(ref pool) = state.workers {
-        let worker = pool.pick().ok_or_else(|| {
-            error!("no workers available in pool");
-            crate::error::ApiError::ProcessingFailed
-        })?;
-        let guard = crate::services::worker_pool::InflightGuard::new(&worker);
-        (worker.speech_url.clone(), Some(guard))
-    } else {
-        let url = state.config.qwen_speech_url.as_ref().ok_or_else(|| {
-            error!("QWEN_SPEECH_URL not configured and no worker pool");
-            crate::error::ApiError::InternalError
-        })?.clone();
-        (url, None)
-    };
+    let qwen_url = state.config.qwen_speech_url.as_ref().ok_or_else(|| {
+        error!("QWEN_SPEECH_URL not configured");
+        crate::error::ApiError::InternalError
+    })?;
 
     #[derive(serde::Serialize)]
     struct QwenRequest {
