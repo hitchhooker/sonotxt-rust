@@ -391,6 +391,31 @@ impl WorkerPool {
             .map_err(|_| ServiceError::Timeout)?
     }
 
+    /// LLM streaming: returns a byte stream from /chat_stream (SSE).
+    /// Each line is `data: {"event":"sentence","text":"..."}`.
+    /// The caller reads sentences as they arrive and pipelines TTS.
+    pub async fn llm_stream(&self, req: LlmRequest) -> Result<reqwest::Response, ServiceError> {
+        let worker = self.pick().ok_or(ServiceError::Unavailable)?;
+        worker.inflight.fetch_add(1, Ordering::Relaxed);
+
+        #[derive(Serialize)]
+        struct Body { messages: Vec<LlmMessage>, max_tokens: u32, temperature: f64 }
+
+        let result = self.http
+            .post(format!("{}/chat_stream", worker.llm_url))
+            .json(&Body { messages: req.messages, max_tokens: req.max_tokens, temperature: req.temperature })
+            .send()
+            .await;
+
+        worker.inflight.fetch_sub(1, Ordering::Relaxed);
+
+        let resp = result.map_err(|e| ServiceError::Failed(format!("http: {}", e)))?;
+        if !resp.status().is_success() {
+            return Err(ServiceError::Failed(format!("llm_stream: {}", resp.status())));
+        }
+        Ok(resp)
+    }
+
     /// Backup request: fire a second request to a different worker
     /// if the primary hasn't responded within the p99 latency.
     /// This is Appendix A of the Eriksen paper.
