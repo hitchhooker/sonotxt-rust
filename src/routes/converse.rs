@@ -36,6 +36,11 @@ pub struct ConverseRequest {
     pub speaker: String,
     #[serde(default = "default_language")]
     pub language: String,
+    /// Opt-in streaming: returns SSE instead of JSON.
+    /// Streams sentences + audio as they're generated.
+    /// Better for long responses (first audio ~2s vs ~4s+).
+    #[serde(default)]
+    pub stream: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -72,11 +77,22 @@ pub struct Timing {
 
 pub fn routes() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/converse", post(converse))
-        .route("/converse_stream", post(converse_stream))
+        .route("/converse", post(converse_dispatch))
         .route("/transcribe", post(transcribe))
         .route("/chat", post(chat))
         .route("/synthesize", post(synthesize))
+}
+
+/// Single entry point — routes to batch or streaming based on `stream` flag.
+async fn converse_dispatch(
+    state: State<Arc<AppState>>,
+    Json(req): Json<ConverseRequest>,
+) -> Result<Response, StatusCode> {
+    if req.stream {
+        converse_stream(state, Json(req)).await
+    } else {
+        converse(state, Json(req)).await.map(|j| j.into_response())
+    }
 }
 
 fn svc_err(e: ServiceError) -> StatusCode {
