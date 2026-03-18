@@ -34,7 +34,7 @@ fn default_engine() -> String {
 }
 
 fn default_voice() -> String {
-    "af_bella".to_string()
+    "serena".to_string()
 }
 
 #[derive(Debug, Serialize)]
@@ -48,24 +48,6 @@ struct TtsResponse {
 }
 
 const VALID_VOICES: &[&str] = &[
-    // kokoro voices
-    "af_alloy", "af_aoede", "af_bella", "af_heart", "af_jessica", "af_kore",
-    "af_nicole", "af_nova", "af_river", "af_sarah", "af_sky",
-    "am_adam", "am_echo", "am_eric", "am_fenrir", "am_liam", "am_michael",
-    "am_onyx", "am_puck", "am_santa",
-    "bf_alice", "bf_emma", "bf_isabella", "bf_lily",
-    "bm_daniel", "bm_fable", "bm_george", "bm_lewis",
-    "ef_dora", "em_alex", "em_santa", "ff_siwis",
-    "hf_alpha", "hf_beta", "hm_omega", "hm_psi",
-    "if_sara", "im_nicola",
-    "jf_alpha", "jf_gongitsune", "jf_nezumi", "jf_tebukuro", "jm_kumo",
-    "pf_dora", "pm_alex", "pm_santa",
-    "zf_xiaobei", "zf_xiaoni", "zf_xiaoxiao", "zf_xiaoyi",
-    "zm_yunjian", "zm_yunxi", "zm_yunxia", "zm_yunyang",
-    // vibevoice voices
-    "en-Carter_man", "en-Davis_man", "en-Emma_woman",
-    "en-Frank_man", "en-Grace_woman", "en-Mike_man",
-    // qwen3-tts voices
     "ryan", "serena", "aiden", "vivian", "eric",
     "dylan", "sohee", "ono_anna", "uncle_fu",
 ];
@@ -104,45 +86,32 @@ async fn workers_status(State(state): State<Arc<AppState>>) -> Json<serde_json::
     }
 }
 
-async fn list_voices(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let samples_url = format!("{}/samples", state.config.audio_public_url);
-
-    // Read voices from DB (marketplace-ready)
-    let rows: Vec<(String, String, String, String, Option<String>, String)> = sqlx::query_as(
-        r#"
-        SELECT v.name, v.display_name, v.language, m.name as model_name,
-               v.gender, p.name as provider_name
-        FROM voices v
-        JOIN models m ON v.model_id = m.id
-        JOIN providers p ON m.provider_id = p.id
-        WHERE v.active = TRUE AND m.active = TRUE AND p.active = TRUE
-        ORDER BY m.name, v.language, v.name
-        "#,
-    )
-    .fetch_all(&state.db)
-    .await
-    .unwrap_or_default();
-
-    let voices: Vec<serde_json::Value> = rows
-        .iter()
-        .map(|(name, display, lang, model, gender, provider)| {
-            serde_json::json!({
-                "id": name,
-                "name": display,
-                "language": lang,
-                "model": model,
-                "gender": gender,
-                "provider": provider,
-                "sample_url": format!("{}/{}.mp3", samples_url, name)
-            })
+async fn list_voices(State(_state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let voices: Vec<serde_json::Value> = [
+        ("ryan",     "Ryan",      "en", "male"),
+        ("serena",   "Serena",    "en", "female"),
+        ("aiden",    "Aiden",     "en", "male"),
+        ("vivian",   "Vivian",    "en", "female"),
+        ("eric",     "Eric",      "en", "male"),
+        ("dylan",    "Dylan",     "en", "male"),
+        ("sohee",    "Sohee",     "ko", "female"),
+        ("ono_anna", "Anna",      "ja", "female"),
+        ("uncle_fu", "Uncle Fu",  "zh", "male"),
+    ].iter().map(|(id, name, lang, gender)| {
+        serde_json::json!({
+            "id": id,
+            "name": name,
+            "language": lang,
+            "gender": gender,
+            "model": "qwen3-tts",
         })
-        .collect();
+    }).collect();
 
-    // Also keep VALID_VOICES as fallback for voice validation
     Json(serde_json::json!({
         "voices": voices,
-        "default": "af_bella",
-        "samples_base_url": samples_url,
+        "default": "serena",
+        "languages": ["auto", "english", "chinese", "japanese", "korean", "spanish",
+                      "french", "german", "portuguese", "russian", "italian"],
     }))
 }
 
