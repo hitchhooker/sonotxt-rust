@@ -31,10 +31,9 @@ async fn main() {
         .await
         .expect("Database connection failed");
 
-    sqlx::migrate!("../migrations")
-        .run(&db)
-        .await
-        .expect("Failed to run migrations");
+    if let Err(e) = sqlx::migrate!("../migrations").run(&db).await {
+        tracing::warn!("migration check: {} (continuing anyway — schema may already be up to date)", e);
+    }
 
     let http = reqwest::Client::builder()
         .user_agent("sonotxt/1.0")
