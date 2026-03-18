@@ -1,0 +1,212 @@
+use clap::Parser;
+use sonotxt_core::StorageConfig;
+
+#[derive(Parser, Debug, Clone)]
+#[command(name = "sonotxt-api")]
+#[command(about = "TTS API server", long_about = None)]
+pub struct Config {
+    #[arg(long, env = "REDIS_URL", default_value = "redis://127.0.0.1:6379")]
+    pub redis_url: String,
+
+    #[arg(long, env = "SERVER_HOST", default_value = "0.0.0.0")]
+    pub host: String,
+
+    #[arg(long, env = "SERVER_PORT", default_value = "8080")]
+    pub port: u16,
+
+    #[arg(long, env = "RUST_LOG", default_value = "info")]
+    pub log_level: String,
+
+    #[arg(long, env = "COST_PER_CHAR", default_value = "0.0000016")]
+    pub cost_per_char: f64,
+
+    #[arg(long, env = "MAX_CONTENT_SIZE", default_value = "50000")]
+    pub max_content_size: usize,
+
+    #[arg(long, env = "REQUEST_TIMEOUT_SECS", default_value = "120")]
+    pub request_timeout: u64,
+
+    #[arg(long, env = "S3_BUCKET", default_value = "sonotxt-audio")]
+    pub s3_bucket: String,
+
+    #[arg(long, env = "ADMIN_TOKEN")]
+    pub admin_token: Option<String>,
+
+    #[arg(long, env = "DATABASE_URL", default_value = "postgres://localhost/sonotxt")]
+    pub database_url: String,
+
+    #[arg(long, env = "FREE_MINUTES_DAILY", default_value = "3")]
+    pub free_minutes_daily: i32,
+
+    #[arg(long, env = "WATERMARK_TEXT", default_value = "Voiced by sonotxt.com")]
+    pub watermark_text: String,
+
+    #[arg(long, env = "COST_PER_MINUTE", default_value = "0.004")]
+    pub cost_per_minute: f64,
+
+    #[arg(long, env = "MODEL_1_5B_MULTIPLIER", default_value = "1.0")]
+    pub model_1_5b_multiplier: f64,
+
+    #[arg(long, env = "MODEL_7B_MULTIPLIER", default_value = "2.0")]
+    pub model_7b_multiplier: f64,
+
+    #[arg(long, env = "CORS_ORIGINS", default_value = "")]
+    pub cors_origins: String,
+
+    #[arg(long, env = "MINIO_ENDPOINT", default_value = "http://localhost:9000")]
+    pub minio_endpoint: String,
+
+    #[arg(long, env = "MINIO_ACCESS_KEY", default_value = "minioadmin")]
+    pub minio_access_key: String,
+
+    #[arg(long, env = "MINIO_SECRET_KEY", default_value = "minioadmin")]
+    pub minio_secret_key: String,
+
+    #[arg(long, env = "AUDIO_PUBLIC_URL", default_value = "http://localhost:9000/sonotxt-audio")]
+    pub audio_public_url: String,
+
+    // email via jmap (magic link)
+    #[arg(long, env = "JMAP_URL")]
+    pub jmap_url: Option<String>,
+
+    #[arg(long, env = "JMAP_USER")]
+    pub jmap_user: Option<String>,
+
+    #[arg(long, env = "JMAP_PASS")]
+    pub jmap_pass: Option<String>,
+
+    #[arg(long, env = "JMAP_FROM", default_value = "noreply@sonotxt.com")]
+    pub jmap_from: String,
+
+    #[arg(long, env = "APP_URL", default_value = "http://localhost:3000")]
+    pub app_url: String,
+
+    // stripe
+    #[arg(long, env = "STRIPE_SECRET_KEY")]
+    pub stripe_secret_key: Option<String>,
+
+    #[arg(long, env = "STRIPE_WEBHOOK_SECRET")]
+    pub stripe_webhook_secret: Option<String>,
+
+    // polkadot assethub
+    #[arg(long, env = "ASSETHUB_RPC", default_value = "wss://polkadot-asset-hub-rpc.polkadot.io")]
+    pub assethub_rpc: String,
+
+    #[arg(long, env = "ASSETHUB_USDC_ASSET_ID", default_value = "1337")]
+    pub assethub_usdc_asset_id: u32,
+
+    #[arg(long, env = "ASSETHUB_USDT_ASSET_ID", default_value = "1984")]
+    pub assethub_usdt_asset_id: u32,
+
+    #[arg(long, env = "ASSETHUB_LISTENER_ENABLED", default_value = "false")]
+    pub assethub_listener_enabled: bool,
+
+    #[arg(long, env = "ASSETHUB_MEDIUM_WALLET")]
+    pub assethub_medium_wallet: Option<String>,
+
+    // penumbra
+    #[arg(long, env = "PENUMBRA_RPC")]
+    pub penumbra_rpc: Option<String>,
+
+    // deposit wallet seed (for generating per-user addresses)
+    #[arg(long, env = "DEPOSIT_WALLET_SEED")]
+    pub deposit_wallet_seed: Option<String>,
+
+    // penumbra spend key (bech32 format, penumbraspendkey1...)
+    #[arg(long, env = "PENUMBRA_SPEND_KEY")]
+    pub penumbra_spend_key: Option<String>,
+
+    // path to pcli config.toml (reads spend_key from it)
+    #[arg(long, env = "PCLI_CONFIG_PATH")]
+    pub pcli_config_path: Option<String>,
+
+    // ipfs storage
+    #[arg(long, env = "IPFS_API_URL", default_value = "http://127.0.0.1:5001")]
+    pub ipfs_api_url: String,
+
+    #[arg(long, env = "IPFS_GATEWAY_URL", default_value = "https://ipfs.io/ipfs")]
+    pub ipfs_gateway_url: String,
+
+    // crust pinning
+    #[arg(long, env = "CRUST_API_URL", default_value = "https://pin.crustcode.com/psa")]
+    pub crust_api_url: String,
+
+    #[arg(long, env = "CRUST_AUTH_TOKEN")]
+    pub crust_auth_token: Option<String>,
+
+    // cost per MB for crust pinning (in USD)
+    #[arg(long, env = "CRUST_COST_PER_MB", default_value = "0.001")]
+    pub crust_cost_per_mb: f64,
+
+    // default storage backend: "minio" or "ipfs"
+    #[arg(long, env = "DEFAULT_STORAGE", default_value = "minio")]
+    pub default_storage: String,
+
+    // embed secret for HMAC domain verification
+    #[arg(long, env = "EMBED_SECRET")]
+    pub embed_secret: Option<String>,
+
+    // embed daily char limit per domain
+    #[arg(long, env = "EMBED_DAILY_LIMIT", default_value = "50000")]
+    pub embed_daily_limit: i32,
+
+    // vibevoice tts service url (python service on bkk07)
+    #[arg(long, env = "VIBEVOICE_URL")]
+    pub vibevoice_url: Option<String>,
+
+    // qwen speech service (TTS + ASR via quicnet proxy)
+    #[arg(long, env = "QWEN_SPEECH_URL")]
+    pub qwen_speech_url: Option<String>,
+
+    // API key for quicnet TTS proxy (Authorization: Bearer <key>)
+    #[arg(long, env = "QWEN_SPEECH_API_KEY")]
+    pub qwen_speech_api_key: Option<String>,
+
+    // qwen LLM chat service (on vast.ai GPU)
+    #[arg(long, env = "QWEN_LLM_URL")]
+    pub qwen_llm_url: Option<String>,
+
+    /// Worker pool: comma-separated base URLs for GPU workers.
+    /// Each URL is a speech service on :8080; LLM is derived as :8090.
+    /// When set, load-balances across all workers with health checks.
+    /// Example: `http://1.2.3.4:8080,http://5.6.7.8:8080`
+    #[arg(long, env = "WORKER_URLS")]
+    pub worker_urls: Option<String>,
+
+    // SONO pricing
+    /// Base SONO price in USD (default $0.01)
+    #[arg(long, env = "SONO_PRICE_USD", default_value = "0.01")]
+    pub sono_price_usd: f64,
+
+    /// Fiat premium percentage (0.05 = 5%)
+    #[arg(long, env = "SONO_FIAT_PREMIUM", default_value = "0.10")]
+    pub sono_fiat_premium: f64,
+
+    /// Price oracle update interval in seconds
+    #[arg(long, env = "SONO_PRICE_INTERVAL", default_value = "300")]
+    pub sono_price_interval: u64,
+}
+
+impl Config {
+    pub fn from_env() -> Self {
+        dotenvy::dotenv().ok();
+        Self::parse()
+    }
+
+    /// Extract the storage-related config for sonotxt-core StorageService.
+    pub fn storage_config(&self) -> StorageConfig {
+        StorageConfig {
+            s3_bucket: self.s3_bucket.clone(),
+            minio_endpoint: self.minio_endpoint.clone(),
+            minio_access_key: self.minio_access_key.clone(),
+            minio_secret_key: self.minio_secret_key.clone(),
+            audio_public_url: self.audio_public_url.clone(),
+            ipfs_api_url: self.ipfs_api_url.clone(),
+            ipfs_gateway_url: self.ipfs_gateway_url.clone(),
+            crust_api_url: self.crust_api_url.clone(),
+            crust_auth_token: self.crust_auth_token.clone(),
+            crust_cost_per_mb: self.crust_cost_per_mb,
+            default_storage: self.default_storage.clone(),
+        }
+    }
+}

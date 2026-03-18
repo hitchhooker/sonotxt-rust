@@ -1,0 +1,568 @@
+use axum::{
+    body::Body,
+    extract::{Path, Query, State},
+    http::header,
+    response::{IntoResponse, Response},
+    routing::{get, post},
+    Json, Router,
+};
+use serde::{Deserialize, Serialize};
+use std::{collections::HashMap, sync::Arc};
+use uuid::Uuid;
+
+use crate::{
+    auth::{AuthenticatedUser, TtsUser, check_free_tier_limit, check_free_tier_limit_with, consume_free_tier, get_free_tier_remaining, hash_ip, FREE_TIER_DAILY_LIMIT, FREE_TIER_LOGGED_IN_LIMIT},
+    error::Result,
+    models::{JobStatus, ProcessRequest, ProcessResponse},
+    services::content::extract_content,
+    AppState,
+};
+
+#[derive(Debug, Deserialize)]
+struct TtsRequest {
+    text: String,
+    #[serde(default = "default_voice")]
+    voice: String,
+    #[serde(default)]
+    storage: Option<String>, // "minio" or "ipfs"
+    #[serde(default = "default_engine")]
+    engine: String, // "qwen" | "vibevoice" | "vibevoice-streaming"
+}
+
+fn default_engine() -> String {
+    "qwen".to_string()
+}
+
+fn default_voice() -> String {
+    "af_bella".to_string()
+}
+
+#[derive(Debug, Serialize)]
+struct TtsResponse {
+    job_id: String,
+    status: JobStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    estimated_cost: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    free_tier_remaining: Option<i32>,
+}
+
+const VALID_VOICES: &[&str] = &[
+    // kokoro voices
+    "af_alloy", "af_aoede", "af_bella", "af_heart", "af_jessica", "af_kore",
+    "af_nicole", "af_nova", "af_river", "af_sarah", "af_sky",
+    "am_adam", "am_echo", "am_eric", "am_fenrir", "am_liam", "am_michael",
+    "am_onyx", "am_puck", "am_santa",
+    "bf_alice", "bf_emma", "bf_isabella", "bf_lily",
+    "bm_daniel", "bm_fable", "bm_george", "bm_lewis",
+    "ef_dora", "em_alex", "em_santa", "ff_siwis",
+    "hf_alpha", "hf_beta", "hm_omega", "hm_psi",
+    "if_sara", "im_nicola",
+    "jf_alpha", "jf_gongitsune", "jf_nezumi", "jf_tebukuro", "jm_kumo",
+    "pf_dora", "pm_alex", "pm_santa",
+    "zf_xiaobei", "zf_xiaoni", "zf_xiaoxiao", "zf_xiaoyi",
+    "zm_yunjian", "zm_yunxi", "zm_yunxia", "zm_yunyang",
+    // vibevoice voices
+    "en-Carter_man", "en-Davis_man", "en-Emma_woman",
+    "en-Frank_man", "en-Grace_woman", "en-Mike_man",
+    // qwen3-tts voices
+    "ryan", "serena", "aiden", "vivian", "eric",
+    "dylan", "sohee", "ono_anna", "uncle_fu",
+];
+
+pub fn routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/process", post(process))
+        .route("/tts", post(tts))
+        .route("/extract", post(extract))
+        .route("/status", get(status))
+        .route("/voices", get(list_voices))
+        .route("/download/{job_id}", get(download_audio))
+        .route("/free-balance", get(free_balance))
+        .route("/workers", get(workers_status))
+}
+
+/// Worker pool status — shows all GPU workers, health, load
+async fn workers_status(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    if let Some(ref pool) = state.workers {
+        Json(serde_json::json!({
+            "workers": pool.status(),
+            "healthy": pool.healthy_count(),
+            "total": pool.len(),
+        }))
+    } else {
+        // Legacy single-worker mode
+        Json(serde_json::json!({
+            "workers": [],
+            "healthy": 0,
+            "total": 0,
+            "legacy": {
+                "speech_url": state.config.qwen_speech_url,
+                "llm_url": state.config.qwen_llm_url,
+            }
+        }))
+    }
+}
+
+async fn list_voices(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
+    let samples_url = format!("{}/samples", state.config.audio_public_url);
+
+    // Read voices from DB (marketplace-ready)
+    let rows: Vec<(String, String, String, String, Option<String>, String)> = sqlx::query_as(
+        r#"
+        SELECT v.name, v.display_name, v.language, m.name as model_name,
+               v.gender, p.name as provider_name
+        FROM voices v
+        JOIN models m ON v.model_id = m.id
+        JOIN providers p ON m.provider_id = p.id
+        WHERE v.active = TRUE AND m.active = TRUE AND p.active = TRUE
+        ORDER BY m.name, v.language, v.name
+        "#,
+    )
+    .fetch_all(&state.db)
+    .await
+    .unwrap_or_default();
+
+    let voices: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|(name, display, lang, model, gender, provider)| {
+            serde_json::json!({
+                "id": name,
+                "name": display,
+                "language": lang,
+                "model": model,
+                "gender": gender,
+                "provider": provider,
+                "sample_url": format!("{}/{}.mp3", samples_url, name)
+            })
+        })
+        .collect();
+
+    // Also keep VALID_VOICES as fallback for voice validation
+    Json(serde_json::json!({
+        "voices": voices,
+        "default": "af_bella",
+        "samples_base_url": samples_url,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct ExtractRequest {
+    url: String,
+    #[serde(default)]
+    selector: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ExtractResponse {
+    text: String,
+    title: Option<String>,
+    char_count: usize,
+    word_count: usize,
+}
+
+async fn extract(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ExtractRequest>,
+) -> Result<Json<ExtractResponse>> {
+    let content = extract_content(&state, &req.url, req.selector.as_deref()).await?;
+    let word_count = content.text.split_whitespace().count();
+
+    Ok(Json(ExtractResponse {
+        char_count: content.text.len(),
+        word_count,
+        title: content.title,
+        text: content.text,
+    }))
+}
+
+async fn process(
+    State(state): State<Arc<AppState>>,
+    user: AuthenticatedUser,
+    Json(req): Json<ProcessRequest>,
+) -> Result<Json<ProcessResponse>> {
+    let extracted = extract_content(&state, &req.url, req.selector.as_deref()).await?;
+    let content = extracted.text;
+    let estimated_cost = (content.len() as f64) * state.config.cost_per_char;
+
+    let price = match &state.sono {
+        Some(sono) => sono.price.read().await.clone(),
+        None => crate::services::sono::PriceInfo::default(),
+    };
+    let txt_cost = crate::services::billing::txt_cost_for_chars(
+        content.len(), state.config.cost_per_char, &price,
+    );
+
+    crate::services::billing::check_and_charge(
+        &state.db,
+        state.sono.as_deref(),
+        user.account_id,
+        user.wallet_address.as_deref(),
+        txt_cost,
+    ).await?;
+
+    let job_id = Uuid::new_v4().to_string();
+
+    sqlx::query!(
+        "INSERT INTO jobs (id, api_key, text_content, status, cost) VALUES ($1, $2, $3, 'queued', $4)",
+        job_id,
+        user.api_key,
+        content.as_str(),
+        estimated_cost
+    )
+    .execute(&state.db)
+    .await?;
+
+    crate::notify_job(&state, &job_id).await;
+
+    Ok(Json(ProcessResponse {
+        job_id,
+        status: JobStatus::Queued { position: None, estimated_seconds: None },
+        estimated_cost,
+    }))
+}
+
+async fn tts(
+    State(state): State<Arc<AppState>>,
+    user: TtsUser,
+    Json(req): Json<TtsRequest>,
+) -> Result<Json<TtsResponse>> {
+    let text = req.text.trim();
+
+    if text.is_empty() {
+        return Err(crate::error::ApiError::InvalidRequestError);
+    }
+
+    // free tier gets smaller limit
+    let max_size = if user.is_free_tier() {
+        1000
+    } else {
+        state.config.max_content_size
+    };
+
+    if text.len() > max_size {
+        return Err(crate::error::ApiError::ContentTooLarge);
+    }
+
+    // validate voice
+    let voice = if VALID_VOICES.contains(&req.voice.as_str()) {
+        req.voice.clone()
+    } else {
+        default_voice()
+    };
+
+    // validate engine
+    let engine = match req.engine.as_str() {
+        "qwen" | "vibevoice" | "vibevoice-streaming" => req.engine.clone(),
+        _ => default_engine(),
+    };
+
+    let job_id = Uuid::new_v4().to_string();
+    let char_count = text.len() as i32;
+
+    match user {
+        TtsUser::Authenticated(auth_user) => {
+            let estimated_duration_ms = (char_count as f64 * crate::models::MS_PER_CHAR) as i32;
+            let storage_type = req.storage.as_deref();
+
+            // Get price and compute TXT cost
+            let price = match &state.sono {
+                Some(sono) => sono.price.read().await.clone(),
+                None => crate::services::sono::PriceInfo::default(),
+            };
+            let txt_cost = crate::services::billing::txt_cost_for_chars(
+                text.len(), state.config.cost_per_char, &price,
+            );
+            let estimated_cost = text.len() as f64 * state.config.cost_per_char;
+
+            // Try TXT billing (custodial balance + payment channel)
+            match crate::services::billing::check_and_charge(
+                &state.db,
+                state.sono.as_deref(),
+                auth_user.account_id,
+                auth_user.wallet_address.as_deref(),
+                txt_cost,
+            ).await {
+                Ok(_charge) => {
+                    // Paid — create job at priority 50
+                    sqlx::query!(
+                        "INSERT INTO jobs (id, api_key, text_content, voice, status, cost, is_free_tier, char_count, estimated_duration_ms, storage_type, engine, priority) VALUES ($1, $2, $3, $4, 'queued', $5, FALSE, $6, $7, $8, $9, $10)",
+                        job_id,
+                        auth_user.api_key,
+                        text,
+                        voice,
+                        estimated_cost,
+                        char_count,
+                        estimated_duration_ms,
+                        storage_type,
+                        engine,
+                        50i32
+                    )
+                    .execute(&state.db)
+                    .await?;
+
+                    crate::notify_job(&state, &job_id).await;
+
+                    let estimated_seconds = estimated_duration_ms as f64 / 1000.0;
+                    Ok(Json(TtsResponse {
+                        job_id,
+                        status: JobStatus::Queued { position: None, estimated_seconds: Some(estimated_seconds) },
+                        estimated_cost: Some(estimated_cost),
+                        free_tier_remaining: None,
+                    }))
+                }
+                Err(_) => {
+                    // No TXT balance — fall back to logged-in free tier (1000 chars/day)
+                    let user_hash = hash_ip(&auth_user.account_id.to_string());
+                    let remaining = check_free_tier_limit_with(
+                        &state.db, &user_hash, char_count, FREE_TIER_LOGGED_IN_LIMIT,
+                    ).await?;
+
+                    consume_free_tier(&state.db, &user_hash, char_count).await?;
+
+                    let storage_type: Option<&str> = Some("minio");
+                    let engine_type = if voice.starts_with("en-") {
+                        "vibevoice-streaming"
+                    } else {
+                        "qwen"
+                    };
+
+                    sqlx::query(
+                        "INSERT INTO jobs (id, api_key, text_content, voice, status, cost, is_free_tier, char_count, estimated_duration_ms, storage_type, engine, priority) VALUES ($1, $2, $3, $4, 'queued', 0, TRUE, $5, $6, $7, $8, 10)",
+                    )
+                    .bind(&job_id)
+                    .bind(&auth_user.api_key)
+                    .bind(&text)
+                    .bind(&voice)
+                    .bind(char_count)
+                    .bind(estimated_duration_ms)
+                    .bind(storage_type)
+                    .bind(engine_type)
+                    .execute(&state.db)
+                    .await?;
+
+                    crate::notify_job(&state, &job_id).await;
+
+                    let estimated_seconds = estimated_duration_ms as f64 / 1000.0;
+                    Ok(Json(TtsResponse {
+                        job_id,
+                        status: JobStatus::Queued { position: None, estimated_seconds: Some(estimated_seconds) },
+                        estimated_cost: Some(0.0),
+                        free_tier_remaining: Some(remaining - char_count),
+                    }))
+                }
+            }
+        }
+
+        TtsUser::FreeTier { ip_hash } => {
+            // check and consume free tier allowance
+            let remaining = check_free_tier_limit(&state.db, &ip_hash, char_count).await?;
+
+            let mut tx = state.db.begin().await?;
+
+            // consume the chars
+            sqlx::query!(
+                "UPDATE free_tier_usage SET chars_used = chars_used + $1 WHERE ip_hash = $2",
+                char_count,
+                ip_hash
+            )
+            .execute(&mut *tx)
+            .await?;
+
+            let estimated_duration_ms = (char_count as f64 * crate::models::MS_PER_CHAR) as i32;
+            // free tier only gets minio, not ipfs (to avoid pinning costs)
+            let storage_type: Option<&str> = Some("minio");
+            let engine_type = if voice.starts_with("en-") {
+                "vibevoice-streaming"
+            } else {
+                "qwen"
+            };
+
+            // create job with ip_hash instead of api_key, priority 0 (free tier)
+            sqlx::query!(
+                "INSERT INTO jobs (id, ip_hash, text_content, voice, status, cost, is_free_tier, char_count, estimated_duration_ms, storage_type, engine, priority) VALUES ($1, $2, $3, $4, 'queued', 0, TRUE, $5, $6, $7, $8, 0)",
+                job_id,
+                ip_hash,
+                text,
+                voice,
+                char_count,
+                estimated_duration_ms,
+                storage_type,
+                engine_type
+            )
+            .execute(&mut *tx)
+            .await?;
+
+            tx.commit().await?;
+
+            crate::notify_job(&state, &job_id).await;
+
+            let estimated_seconds = estimated_duration_ms as f64 / 1000.0;
+            Ok(Json(TtsResponse {
+                job_id,
+                status: JobStatus::Queued { position: None, estimated_seconds: Some(estimated_seconds) },
+                estimated_cost: None,
+                free_tier_remaining: Some(remaining - char_count),
+            }))
+        }
+    }
+}
+
+async fn status(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<JobStatus>> {
+    let job_id = params
+        .get("job_id")
+        .ok_or(crate::error::ApiError::InvalidRequestError)?;
+
+    let job = sqlx::query!(
+        r#"SELECT
+            status,
+            audio_url,
+            duration_seconds,
+            error_message,
+            estimated_duration_ms,
+            actual_runtime_ms,
+            deepinfra_cost,
+            started_at,
+            created_at,
+            storage_type,
+            ipfs_cid
+        FROM jobs WHERE id = $1"#,
+        job_id
+    )
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(crate::error::ApiError::NotFound)?;
+
+    let estimated_seconds = job.estimated_duration_ms.map(|ms| ms as f64 / 1000.0);
+
+    match job.status.as_str() {
+        "completed" => Ok(Json(JobStatus::Complete {
+            url: job.audio_url.unwrap_or_default(),
+            duration_seconds: job.duration_seconds.unwrap_or(0.0),
+            runtime_ms: job.actual_runtime_ms,
+            cost: job.deepinfra_cost,
+            storage_type: job.storage_type,
+            ipfs_cid: job.ipfs_cid,
+        })),
+        "failed" => Ok(Json(JobStatus::Failed {
+            reason: job.error_message.unwrap_or_else(|| "Processing failed".into()),
+        })),
+        "processing" => {
+            // Calculate progress based on elapsed time vs estimated
+            let elapsed_seconds = job.started_at
+                .map(|started| {
+                    let now = chrono::Utc::now();
+                    (now - started).num_milliseconds() as f64 / 1000.0
+                });
+
+            let progress: u8 = match (elapsed_seconds, estimated_seconds) {
+                (Some(elapsed), Some(estimated)) if estimated > 0.0 => {
+                    let pct = ((elapsed / estimated) * 100.0).min(99.0) as u8;
+                    pct.max(1) // at least 1%
+                }
+                _ => 50, // fallback
+            };
+
+            Ok(Json(JobStatus::Processing {
+                progress,
+                elapsed_seconds,
+                estimated_seconds,
+            }))
+        }
+        "queued" => {
+            // Count position in queue
+            let position = sqlx::query_scalar!(
+                "SELECT COUNT(*) FROM jobs WHERE status = 'queued' AND created_at < $1",
+                job.created_at
+            )
+            .fetch_one(&state.db)
+            .await?
+            .map(|c| c as u32);
+
+            Ok(Json(JobStatus::Queued {
+                position,
+                estimated_seconds,
+            }))
+        }
+        _ => Ok(Json(JobStatus::Queued { position: None, estimated_seconds })),
+    }
+}
+
+#[derive(Debug, Serialize)]
+struct FreeBalanceResponse {
+    remaining: i32,
+    limit: i32,
+}
+
+async fn free_balance(
+    State(state): State<Arc<AppState>>,
+    user: TtsUser,
+) -> Result<Json<FreeBalanceResponse>> {
+    let (ip_hash, limit) = match &user {
+        TtsUser::Authenticated(_) => {
+            // authenticated users get higher free tier limit
+            // they don't carry ip_hash, so return full limit
+            return Ok(Json(FreeBalanceResponse {
+                remaining: FREE_TIER_LOGGED_IN_LIMIT,
+                limit: FREE_TIER_LOGGED_IN_LIMIT,
+            }));
+        }
+        TtsUser::FreeTier { ip_hash } => (ip_hash.clone(), FREE_TIER_DAILY_LIMIT),
+    };
+
+    let (remaining, limit) = get_free_tier_remaining(&state.db, &ip_hash, limit).await?;
+    Ok(Json(FreeBalanceResponse { remaining, limit }))
+}
+
+async fn download_audio(
+    State(state): State<Arc<AppState>>,
+    Path(job_id): Path<String>,
+) -> Result<impl IntoResponse> {
+    // get audio url from job - audio_url is nullable TEXT so we get Option<Option<String>>
+    let audio_url: String = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT audio_url FROM jobs WHERE id = $1 AND status = 'completed'"
+    )
+    .bind(&job_id)
+    .fetch_optional(&state.db)
+    .await?
+    .flatten() // Option<Option<String>> -> Option<String>
+    .ok_or(crate::error::ApiError::NotFound)?;
+
+    // fetch audio from storage
+    let client = reqwest::Client::new();
+    let response = client
+        .get(&audio_url)
+        .send()
+        .await
+        .map_err(|_| crate::error::ApiError::InternalError)?;
+
+    if !response.status().is_success() {
+        return Err(crate::error::ApiError::NotFound);
+    }
+
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(|_| crate::error::ApiError::InternalError)?;
+
+    // detect format from url extension
+    let (extension, content_type) = if audio_url.ends_with(".ogg") {
+        ("ogg", "audio/ogg")
+    } else {
+        ("mp3", "audio/mpeg")
+    };
+
+    let filename = format!("sonotxt-{}.{}", job_id, extension);
+
+    Ok(Response::builder()
+        .header(header::CONTENT_TYPE, content_type)
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{}\"", filename),
+        )
+        .body(Body::from(bytes))
+        .unwrap())
+}

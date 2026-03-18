@@ -1,0 +1,20 @@
+[package]
+name = "sonotxt-worker"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sonotxt-core = { path = "../sonotxt-core" }
+
+axum = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap = { workspace = true }
+dotenvy = { workspace = true }
+quinn = "0.11"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+sha2 = "0.10"

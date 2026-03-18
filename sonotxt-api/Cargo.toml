@@ -1,0 +1,74 @@
+[package]
+name = "sonotxt-api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sonotxt-core = { path = "../sonotxt-core" }
+
+axum = { workspace = true }
+axum-extra = { version = "0.9", features = ["typed-header"] }
+futures = "0.3"
+headers = "0.4"
+tokio = { workspace = true }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "limit", "timeout", "trace"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+blake3 = "1.5"
+redis = { workspace = true }
+reqwest = { workspace = true }
+tokio-stream = "0.1"
+futures-util = "0.3"
+scraper = "0.19"
+url = "2.5"
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+dotenvy = { workspace = true }
+anyhow = "1"
+clap = { workspace = true }
+sqlx = { workspace = true }
+subtle = "2.5"
+aws-sdk-s3 = { workspace = true }
+aws-config = { workspace = true }
+aws-credential-types = { workspace = true }
+base64 = "0.22"
+rand = "0.8"
+hex = { workspace = true }
+
+# stripe webhook verification
+hmac = "0.12"
+sha2 = "0.10"
+
+# user auth with passphrase-derived keys
+ed25519-dalek = "2"
+argon2 = "0.5"
+getrandom = "0.2"
+
+# polkadot wallet auth (sr25519 + ss58)
+schnorrkel = "0.11"
+bs58 = "0.5"
+blake2b_simd = "1.0"
+
+# hardware-secured payment processor
+hwpay = { path = "../../hwpay", features = ["penumbra"] }
+secrecy = "0.10"
+async-trait = "0.1"
+toml = "0.8"
+
+# webauthn/passkey auth
+webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
+webauthn-rs-proto = "0.5"
+
+# SONO token / payment channel (pallet-revive eth-RPC)
+alloy = { version = "1", features = ["provider-ws", "sol-types", "signers", "signer-local", "contract"] }
+
+# QUIC client for encrypted worker communication
+quinn = "0.11"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+
+[dev-dependencies]
+tempfile = "3"
