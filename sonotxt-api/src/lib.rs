@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod config;
 pub mod extractors;
+pub mod job_worker;
 pub mod routes;
 pub mod services;
 

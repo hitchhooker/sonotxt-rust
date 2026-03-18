@@ -88,6 +88,15 @@ async fn main() {
         tracing::info!("worker pool health checker started ({} workers)", pool_len);
     }
 
+    // Spawn TTS job processor — polls DB queue, routes through worker pool
+    if state.workers.is_some() {
+        let job_state = state.clone();
+        tokio::spawn(async move {
+            sonotxt_api::job_worker::run(job_state).await;
+        });
+        tracing::info!("TTS job worker started");
+    }
+
     // Spawn Asset Hub deposit listener (if enabled)
     if config.assethub_listener_enabled {
         let listener_state = state.clone();

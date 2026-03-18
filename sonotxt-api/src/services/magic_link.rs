@@ -67,11 +67,12 @@ pub async fn request_magic_link(db: &PgPool, email: &str) -> Result<RecoveryRequ
 
     sqlx::query(
         r#"
-        INSERT INTO magic_links (email, token_hash, expires_at)
-        VALUES ($1, $2, $3)
+        INSERT INTO magic_links (email, token, token_hash, expires_at)
+        VALUES ($1, $2, $3, $4)
         "#
     )
     .bind(&email)
+    .bind("_") // legacy column, kept for NOT NULL constraint
     .bind(&token_hash)
     .bind(expires)
     .execute(db)
