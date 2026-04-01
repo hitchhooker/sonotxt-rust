@@ -1,6 +1,7 @@
 pub mod assethub;
 pub mod penumbra;
 pub mod stripe;
+pub mod zcash;
 
 use sqlx::PgPool;
 use uuid::Uuid;
