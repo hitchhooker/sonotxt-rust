@@ -77,6 +77,8 @@ pub fn build_app(state: Arc<AppState>) -> Router {
         .nest("/api/sono", routes::sono::routes())
         .nest("/api/auth/passkey", routes::passkey::routes())
         .nest("/api/contacts", routes::contacts::routes())
+        .nest("/api/provider", routes::provider::routes())
+        .nest("/api/auth", routes::zid_auth::routes())
         .merge(routes::p2p::routes())
         .layer(cors)
         .layer(RequestBodyLimitLayer::new(10 * 1024 * 1024))

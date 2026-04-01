@@ -112,6 +112,10 @@ pub struct Config {
     #[arg(long, env = "DEPOSIT_WALLET_SEED")]
     pub deposit_wallet_seed: Option<String>,
 
+    // zcash deposit address (unified address for receiving ZEC payments)
+    #[arg(long, env = "ZCASH_DEPOSIT_ADDRESS")]
+    pub zcash_deposit_address: Option<String>,
+
     // penumbra spend key (bech32 format, penumbraspendkey1...)
     #[arg(long, env = "PENUMBRA_SPEND_KEY")]
     pub penumbra_spend_key: Option<String>,

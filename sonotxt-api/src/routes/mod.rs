@@ -14,3 +14,5 @@ pub mod passkey;
 pub mod sono;
 pub mod contacts;
 pub mod p2p;
+pub mod provider;
+pub mod zid_auth;
